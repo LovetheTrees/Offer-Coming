@@ -178,7 +178,9 @@ export interface SyncMetadata {
   etag?: string;
   lastSyncedHash?: string;
   lastSyncedAt?: string;
+  hasTrustedBaseline: boolean;
   status: SyncStatus;
+  lastAction?: Exclude<SyncAction, 'conflict'>;
   lastError?: string;
   conflict?: SyncConflictSummary;
 }

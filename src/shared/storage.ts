@@ -46,6 +46,16 @@ function inferCollegeForKnownMockData(school?: string, major?: string): string {
   return '';
 }
 
+export function normalizeSyncMetadata(value: unknown): SyncMetadata {
+  const metadata = value && typeof value === 'object' ? value as Partial<SyncMetadata> : {};
+  const inferredTrusted = Boolean(metadata.lastSyncedHash && metadata.etag);
+  return {
+    ...metadata,
+    status: metadata.status ?? 'idle',
+    hasTrustedBaseline: metadata.hasTrustedBaseline ?? inferredTrusted,
+  };
+}
+
 export class StorageService {
   static async getResumeProfileLibrary(): Promise<ResumeProfileLibrary> {
     const result = await chrome.storage.local.get([
@@ -246,7 +256,7 @@ export class StorageService {
 
   static async getSyncMetadata(): Promise<SyncMetadata> {
     const result = await chrome.storage.local.get(STORAGE_KEYS.SYNC_METADATA);
-    return (result[STORAGE_KEYS.SYNC_METADATA] as SyncMetadata) || { status: 'idle' };
+    return normalizeSyncMetadata(result[STORAGE_KEYS.SYNC_METADATA]);
   }
 
   static async saveSyncMetadata(metadata: SyncMetadata): Promise<void> {

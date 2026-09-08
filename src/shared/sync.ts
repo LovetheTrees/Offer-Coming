@@ -58,14 +58,15 @@ export async function sha256BusinessData(data: BackupData): Promise<string> {
 }
 
 export function decideSyncAction(
+  hasTrustedBaseline: boolean,
   baseHash: string | undefined,
   localHash: string,
   remoteHash: string | undefined,
   remoteExists: boolean,
 ): SyncAction {
-  if (!remoteExists) return baseHash ? 'conflict' : 'create-remote';
-  if (localHash === remoteHash) return 'no-change';
-  if (!baseHash) return 'conflict';
+  if (remoteExists && localHash === remoteHash) return 'no-change';
+  if (!remoteExists) return hasTrustedBaseline ? 'conflict' : 'create-remote';
+  if (!hasTrustedBaseline) return 'conflict';
   if (remoteHash === baseHash && localHash !== baseHash) return 'upload-local';
   if (localHash === baseHash && remoteHash !== baseHash) return 'download-remote';
   return 'conflict';
@@ -113,9 +114,15 @@ async function setError(error: unknown, fallback: string): Promise<'error' | 'co
   return 'error';
 }
 
-async function completeSync(hash: string, etag?: string): Promise<void> {
+async function completeSync(
+  hash: string,
+  etag: string | undefined,
+  action: Exclude<SyncAction, 'conflict'>,
+): Promise<void> {
   await StorageService.saveSyncMetadata({
     status: 'synced',
+    hasTrustedBaseline: true,
+    lastAction: action,
     etag,
     lastSyncedHash: hash,
     lastSyncedAt: new Date().toISOString(),
@@ -163,7 +170,7 @@ async function upload(
     );
   }
   await syncApplicationRecordsCsvSidecar(data.applicationRecords ?? [], config, forceSidecarUpload);
-  await completeSync(localHash, nextEtag);
+  await completeSync(localHash, nextEtag, create ? 'create-remote' : 'upload-local');
 }
 
 export async function performSync(reason: string): Promise<SyncResultStatus> {
@@ -191,6 +198,7 @@ export async function performSync(reason: string): Promise<SyncResultStatus> {
     }
 
     const action = decideSyncAction(
+      previous.hasTrustedBaseline,
       previous.lastSyncedHash,
       localHash,
       remoteHash,
@@ -200,7 +208,7 @@ export async function performSync(reason: string): Promise<SyncResultStatus> {
       await upload(localData, localHash, undefined, true, config, isManualSync);
     } else if (action === 'no-change') {
       await syncApplicationRecordsCsvSidecar(localData.applicationRecords ?? [], config, isManualSync);
-      await completeSync(localHash, remote.etag);
+      await completeSync(localHash, remote.etag, 'no-change');
     } else if (action === 'upload-local') {
       await upload(localData, localHash, remote.etag, false, config, isManualSync);
     } else if (action === 'download-remote' && remoteDocument) {
@@ -213,7 +221,7 @@ export async function performSync(reason: string): Promise<SyncResultStatus> {
           config,
           isManualSync,
         );
-        await completeSync(effectiveHash, remote.etag);
+        await completeSync(effectiveHash, remote.etag, 'download-remote');
       } else {
         await upload(effectiveLocalData, effectiveHash, remote.etag, false, config, isManualSync);
       }
@@ -295,7 +303,7 @@ async function performForceDownloadRemote(): Promise<SyncResultStatus> {
     const remoteHash = await sha256BusinessData(parsed.document.data);
     if (effectiveHash === remoteHash) {
       await syncApplicationRecordsCsvSidecar(effectiveLocalData.applicationRecords ?? [], config, true);
-      await completeSync(effectiveHash, remote.etag);
+      await completeSync(effectiveHash, remote.etag, 'download-remote');
     } else {
       await upload(effectiveLocalData, effectiveHash, remote.etag, false, config, true);
     }

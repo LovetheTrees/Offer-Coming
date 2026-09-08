@@ -45,7 +45,7 @@ export function DataSyncSettings({ onDataChanged }: Props) {
   const [importSummary, setImportSummary] = useState<BackupSummary | null>(null);
   const [confirmingImport, setConfirmingImport] = useState(false);
   const [config, setConfig] = useState<WebDAVConfig>(EMPTY_CONFIG);
-  const [metadata, setMetadata] = useState<SyncMetadata>({ status: 'idle' });
+  const [metadata, setMetadata] = useState<SyncMetadata>({ status: 'idle', hasTrustedBaseline: false });
   const [busy, setBusy] = useState<string | null>(null);
   const [notice, setNotice] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
 

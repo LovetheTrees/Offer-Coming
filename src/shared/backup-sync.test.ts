@@ -7,7 +7,7 @@ import {
   parseAndValidateBackup,
   serializeBackup,
 } from './backup.ts';
-import { StorageService } from './storage.ts';
+import { normalizeSyncMetadata, StorageService } from './storage.ts';
 import {
   decideSyncAction,
   performSync,
@@ -224,19 +224,35 @@ test('exportedAt 不参与业务数据 hash', async () => {
   assert.equal(await sha256BusinessData(first.data), await sha256BusinessData(second.data));
 });
 
-const decisions: Array<[string, string | undefined, string, string | undefined, boolean, string]> = [
-  ['首次远端不存在', undefined, 'local', undefined, false, 'create-remote'],
-  ['双方相同', 'base', 'same', 'same', true, 'no-change'],
-  ['仅本地变化', 'base', 'local', 'base', true, 'upload-local'],
-  ['仅远端变化', 'base', 'base', 'remote', true, 'download-remote'],
-  ['双方变化', 'base', 'local', 'remote', true, 'conflict'],
-  ['无基线且远端不同', undefined, 'local', 'remote', true, 'conflict'],
-  ['有基线但远端被删除', 'base', 'local', undefined, false, 'conflict'],
+test('旧同步元数据仅在 hash 与 ETag 均有效时迁移为可信基线', () => {
+  assert.equal(normalizeSyncMetadata({ status: 'synced', lastSyncedHash: 'v1', etag: 'e1' }).hasTrustedBaseline, true);
+  assert.equal(normalizeSyncMetadata({ status: 'synced', lastSyncedHash: 'v1' }).hasTrustedBaseline, false);
+  assert.equal(normalizeSyncMetadata({ status: 'synced', etag: 'e1' }).hasTrustedBaseline, false);
+});
+
+test('同步元数据显式不可信状态不会被旧字段覆盖', () => {
+  assert.equal(normalizeSyncMetadata({
+    status: 'synced',
+    hasTrustedBaseline: false,
+    lastSyncedHash: 'v1',
+    etag: 'e1',
+  }).hasTrustedBaseline, false);
+});
+
+const decisions: Array<[string, boolean, string | undefined, string, string | undefined, boolean, string]> = [
+  ['首次远端不存在', false, undefined, 'local', undefined, false, 'create-remote'],
+  ['无可信基线但双方相同', false, undefined, 'same', 'same', true, 'no-change'],
+  ['可信基线下双方相同', true, 'base', 'same', 'same', true, 'no-change'],
+  ['仅本地变化', true, 'base', 'local', 'base', true, 'upload-local'],
+  ['仅远端变化', true, 'base', 'base', 'remote', true, 'download-remote'],
+  ['双方变化', true, 'base', 'local', 'remote', true, 'conflict'],
+  ['无可信基线且远端不同', false, undefined, 'local', 'remote', true, 'conflict'],
+  ['可信基线下远端被删除', true, 'base', 'base', undefined, false, 'conflict'],
 ];
 
-for (const [name, base, local, remote, exists, expected] of decisions) {
+for (const [name, trusted, base, local, remote, exists, expected] of decisions) {
   test(`同步决策：${name}`, () => {
-    assert.equal(decideSyncAction(base, local, remote, exists), expected);
+    assert.equal(decideSyncAction(trusted, base, local, remote, exists), expected);
   });
 }
 
@@ -518,6 +534,30 @@ function installChromeStorageMock(initial: Record<string, unknown>) {
     },
   };
 }
+
+test('保存 WebDAV 设置和测试连接不会建立或重置同步基线', async () => {
+  const originalMetadata = {
+    status: 'conflict',
+    hasTrustedBaseline: false,
+    lastSyncedHash: 'legacy-hash',
+    etag: 'legacy-etag',
+  };
+  const mock = installChromeStorageMock({ syncMetadata: originalMetadata });
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (_input, init) => (
+    init?.method === 'MKCOL'
+      ? new Response('', { status: 405 })
+      : new Response('', { status: 404 })
+  );
+  try {
+    await StorageService.saveWebDAVConfig(webdavConfig);
+    await testConnection(webdavConfig);
+    assert.deepEqual(mock.values.syncMetadata, originalMetadata);
+  } finally {
+    globalThis.fetch = originalFetch;
+    mock.restore();
+  }
+});
 
 test('已有同步基线后远端文件被删除会进入冲突状态', async () => {
   const baseHash = await sha256BusinessData(completeData);
