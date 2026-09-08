@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -uo pipefail
 
 cd "$(dirname "$0")"
 
@@ -35,21 +35,50 @@ if ! node -e "const [a,b]=process.versions.node.split('.').map(Number); process.
   exit 1
 fi
 
+install_status=0
+test_status=0
+build_status=0
+
 if [[ -f package-lock.json ]]; then
   echo "== 安装依赖: npm ci =="
-  npm ci
+  if ! npm ci; then
+    install_status=1
+    echo "[错误] 依赖安装失败。请查看上方 npm 日志，其中通常会标出失败的依赖。"
+  fi
 else
   echo "== 安装依赖: npm install (未找到 package-lock.json) =="
-  npm install
+  if ! npm install; then
+    install_status=1
+    echo "[错误] 依赖安装失败。请查看上方 npm 日志，其中通常会标出失败的依赖。"
+  fi
 fi
 
 echo
 echo "== 运行测试: npm test =="
-npm test
+if ! npm test; then
+  test_status=1
+  echo "[错误] 自动化测试失败；仍将继续尝试构建。"
+fi
 
 echo
 echo "== 构建: npm run build =="
-npm run build
+if ! npm run build; then
+  build_status=1
+  echo "[错误] 构建失败，请查看上方日志。"
+fi
+
+echo
+echo "== 执行结果汇总 =="
+[[ $install_status -eq 0 ]] && echo "依赖安装: 成功" || echo "依赖安装: 失败"
+[[ $test_status -eq 0 ]] && echo "测试: 成功" || echo "测试: 失败"
+[[ $build_status -eq 0 ]] && echo "构建: 成功" || echo "构建: 失败"
+
+if (( install_status || test_status || build_status )); then
+  echo "流程已全部尝试，但存在失败，请根据上方日志处理。"
+  read -n 1 -s -r -p "按任意键退出..."
+  echo
+  exit 1
+fi
 
 echo
 echo "完成！依赖安装、测试和构建均已通过。"
