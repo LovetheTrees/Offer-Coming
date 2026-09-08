@@ -68,3 +68,34 @@
 - lint 与测试输出仍包含仓库既有 warning，详见前一轮 concerns；本轮未修改相关文件。
 - 起始工作树已有 `package-lock.json` 修改与 Task 1–3 未跟踪报告，本轮继续不纳入提交。
 - 未 push。
+
+---
+
+## 审查结果修复轮次：首次无 ETag 创建回读验证（2026-09-08）
+
+- 状态：DONE_WITH_CONCERNS
+- 起始提交：`ede4da1131153e238aecf7cd9c941f3ba5280a2d`
+- 最终提交 SHA：以本报告所在提交的 `git rev-parse HEAD` 输出为准，完整值在最终交付回复中提供。
+
+### 变更摘要
+
+- 明确产品裁决：只有首次无 ETag 且本地、远端内容不同时才提示选择；内容相同时校验后直接建立 `hash-fallback` 基线。
+- 修复远端不存在的首次创建：PUT 与回读均无 ETag 时，以回读业务数据 hash 校验创建结果；与本地一致则建立 `hash-fallback` 可信基线并记录 `create-remote`。
+- 回读文件缺失、读取或解析失败、hash 不一致时不建立基线并返回明确错误；单次同步只执行一次备份 PUT，不重复上传或触发确认提示。
+- README、设计文档、实施计划与测试名称已统一为“内容不同时确认”，并补充首次创建无 ETag 的校验契约。
+
+### TDD 证据
+
+- RED：新增两个首次创建测试后 2/2 失败；一致场景错误返回而未建立 fallback，不一致场景仍返回通用缺 ETag 错误。
+- GREEN：聚焦同步测试 90/90 通过；聚焦 UI 测试 9/9 通过。
+- 全量测试：主阶段 175/175、sidepanel 13/13、application-records core 15/15、application-records UI 24/24、resume-profiles 94/94，全部通过。
+- 构建：`npm run build` 成功。
+- 静态检查：`npm run lint` 为 0 errors、10 warnings。
+- 空白检查：`git diff --check` 退出码 0。
+
+### Concerns
+
+- `hash-fallback` 仍不具备 ETag 条件写入的原子并发保证；通过 PUT 前复查和 PUT 后回读校验降低风险。
+- lint 的 10 条 warning 及测试中的 React 测试环境提示均为仓库既有输出，本轮未修改相关文件。
+- 起始工作树已有 `package-lock.json` 修改与 Task 1–3 未跟踪报告，本轮不纳入提交。
+- 未 push。

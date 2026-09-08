@@ -1803,3 +1803,91 @@ test('无 ETag 双设备中 B 上传 V2 后未修改的 A 自动下载 V2', asyn
     a.restore();
   }
 });
+
+
+test('首次创建无 ETag 时回读 hash 一致后建立 hash fallback 且不重复上传备份', async () => {
+  const localData: BackupData = { ...completeData, settings: { locale: 'create-fallback' } };
+  const localHash = await sha256BusinessData(localData);
+  let remoteJson = '';
+  let backupPutCalls = 0;
+  let getCalls = 0;
+  const mock = installChromeStorageMock({
+    resumeProfileLibrary: localData.resumeProfileLibrary,
+    llmConfig: localData.llmConfig,
+    settings: localData.settings,
+    applicationRecords: localData.applicationRecords,
+    webdavConfig,
+    syncMetadata: { status: 'idle', hasTrustedBaseline: false },
+  });
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input, init) => {
+    const url = String(input);
+    if (init?.method === 'GET') {
+      getCalls += 1;
+      return getCalls === 1
+        ? new Response('', { status: 404 })
+        : new Response(remoteJson, { status: 200 });
+    }
+    if (init?.method === 'PUT' && url.endsWith('job-application-helper.json')) {
+      backupPutCalls += 1;
+      remoteJson = String(init.body);
+    }
+    return new Response(null, { status: 204 });
+  };
+  try {
+    assert.equal(await performSync('create-without-etag'), 'synced');
+    const metadata = mock.values.syncMetadata as Record<string, unknown>;
+    assert.equal(metadata.status, 'synced');
+    assert.equal(metadata.hasTrustedBaseline, true);
+    assert.equal(metadata.concurrencyMode, 'hash-fallback');
+    assert.equal(metadata.lastSyncedHash, localHash);
+    assert.equal(metadata.lastAction, 'create-remote');
+    assert.equal(metadata.conflict, undefined);
+    assert.equal(metadata.conflictReason, undefined);
+    assert.equal(backupPutCalls, 1);
+    assert.equal(getCalls, 2);
+  } finally {
+    globalThis.fetch = originalFetch;
+    mock.restore();
+  }
+});
+
+test('首次创建无 ETag 且回读 hash 不一致时不建立基线也不重复 PUT', async () => {
+  const localData: BackupData = { ...completeData, settings: { locale: 'create-local' } };
+  const differentRemote: BackupData = { ...completeData, settings: { locale: 'create-raced' } };
+  let backupPutCalls = 0;
+  let getCalls = 0;
+  const mock = installChromeStorageMock({
+    resumeProfileLibrary: localData.resumeProfileLibrary,
+    llmConfig: localData.llmConfig,
+    settings: localData.settings,
+    applicationRecords: localData.applicationRecords,
+    webdavConfig,
+    syncMetadata: { status: 'idle', hasTrustedBaseline: false },
+  });
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input, init) => {
+    if (init?.method === 'GET') {
+      getCalls += 1;
+      return getCalls === 1
+        ? new Response('', { status: 404 })
+        : new Response(serializeBackup(createBackupDocument(differentRemote, '1.0.0')), { status: 200 });
+    }
+    if (init?.method === 'PUT' && String(input).endsWith('job-application-helper.json')) backupPutCalls += 1;
+    return new Response(null, { status: 204 });
+  };
+  try {
+    assert.equal(await performSync('create-verify-mismatch'), 'error');
+    const metadata = mock.values.syncMetadata as Record<string, unknown>;
+    assert.equal(metadata.status, 'error');
+    assert.equal(metadata.hasTrustedBaseline, false);
+    assert.equal(metadata.lastSyncedHash, undefined);
+    assert.equal(metadata.lastAction, undefined);
+    assert.match(String(metadata.lastError), /回读内容与本地不一致/);
+    assert.equal(backupPutCalls, 1);
+    assert.equal(getCalls, 2);
+  } finally {
+    globalThis.fetch = originalFetch;
+    mock.restore();
+  }
+});

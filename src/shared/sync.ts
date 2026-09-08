@@ -186,9 +186,20 @@ async function upload(
     create ? { type: 'create' } : { type: 'update', etag: etag as string },
   );
   let nextEtag = result.etag;
+  let refreshed: Awaited<ReturnType<typeof getRemoteDocument>> | undefined;
   if (!nextEtag) {
-    const refreshed = await getRemoteDocument(config);
+    refreshed = await getRemoteDocument(config);
     nextEtag = refreshed.etag;
+  }
+  if (!nextEtag && create) {
+    if (!refreshed?.exists) throw new Error('首次创建后远端文件不存在，无法验证同步结果');
+    const parsed = parseAndValidateBackup(refreshed.json || '');
+    if (!parsed.success) throw new Error(`首次创建后远端备份无效：${parsed.error.message}`);
+    const refreshedHash = await sha256BusinessData(parsed.document.data);
+    if (refreshedHash !== localHash) throw new Error('首次创建后回读内容与本地不一致，未建立同步基线');
+    await syncApplicationRecordsCsvSidecar(data.applicationRecords ?? [], config, forceSidecarUpload);
+    await completeSync(localHash, undefined, 'create-remote', true);
+    return;
   }
   if (!nextEtag) {
     throw new WebDAVError(

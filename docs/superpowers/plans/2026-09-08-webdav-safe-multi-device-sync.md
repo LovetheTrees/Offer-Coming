@@ -364,7 +364,7 @@ git commit -m "docs: explain safe webdav synchronization" --trailer "Co-Authored
 
 - [x] **Step 1: Write failing concurrency-mode and no-ETag behavior tests**
   - Persist and normalize `etag | hash-fallback`.
-  - First differing no-ETag remote produces summaries and confirmation state.
+  - First differing no-ETag remote produces summaries and confirmation state; equal content is verified and establishes fallback without prompting.
   - Confirming remote or local establishes a trusted hash baseline.
   - Cover no-repeat confirmation, A/B remote-only download, both-changed conflict, pre-upload recheck, post-upload verification, and ETag upgrade.
 
@@ -375,6 +375,7 @@ git commit -m "docs: explain safe webdav synchronization" --trailer "Co-Authored
 - [x] **Step 3: Implement the two concurrency modes**
   - ETag mode requires hash plus ETag and keeps conditional writes.
   - Hash fallback requires a confirmed/verified hash baseline, rechecks before PUT, verifies after PUT, and upgrades when ETag appears.
+  - If the remote is initially absent and create PUT plus verification GET both omit ETag, matching read-back and local hashes establish a `create-remote` fallback baseline; failed or mismatched read-back leaves no baseline and performs no repeated PUT.
   - Download paths remain PUT-free.
 
 - [x] **Step 4: Update conflict UI and documentation**
