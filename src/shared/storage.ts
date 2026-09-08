@@ -48,13 +48,19 @@ function inferCollegeForKnownMockData(school?: string, major?: string): string {
 
 export function normalizeSyncMetadata(value: unknown): SyncMetadata {
   const metadata = value && typeof value === 'object' ? value as Partial<SyncMetadata> : {};
+  const mode = metadata.concurrencyMode === 'hash-fallback'
+    ? 'hash-fallback'
+    : metadata.etag
+      ? 'etag'
+      : metadata.concurrencyMode;
   const hasTrustedBaseline = Boolean(
     metadata.lastSyncedHash
-    && metadata.etag
-    && metadata.hasTrustedBaseline !== false,
+    && metadata.hasTrustedBaseline !== false
+    && (mode === 'hash-fallback' || (mode === 'etag' && metadata.etag)),
   );
   return {
     ...metadata,
+    concurrencyMode: mode,
     status: metadata.status ?? 'idle',
     hasTrustedBaseline,
   };

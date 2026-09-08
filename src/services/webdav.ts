@@ -202,7 +202,7 @@ export async function getRemoteDocument(config: WebDAVConfig): Promise<RemoteDoc
 export async function putRemoteDocument(
   config: WebDAVConfig,
   json: string,
-  condition: { type: 'create' } | { type: 'update'; etag: string },
+  condition: { type: 'create' } | { type: 'update'; etag: string } | { type: 'overwrite' },
 ): Promise<{ etag?: string }> {
   return putRemoteFile(
     config,

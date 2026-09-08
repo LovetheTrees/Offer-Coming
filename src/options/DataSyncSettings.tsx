@@ -252,7 +252,7 @@ export function DataSyncSettings({ onDataChanged }: Props) {
         <div className="data-section-heading">
           <div>
             <h2 className="settings-section-title">WebDAV 同步</h2>
-            <p className="settings-description">以 ETag 条件请求安全同步同一份明文 JSON；投递记录会额外保留一份 CSV 副本；凭据仅保存在本机。</p>
+            <p className="settings-description">优先使用 ETag 条件请求；服务不提供 ETag 时，经首次确认后使用内容哈希校验同步；投递记录会额外保留一份 CSV 副本；凭据仅保存在本机。</p>
           </div>
           <span className={`sync-status sync-status-${metadata.status}`}>
             {STATUS_LABELS[metadata.status]}
@@ -321,9 +321,13 @@ export function DataSyncSettings({ onDataChanged }: Props) {
 
         {metadata.status === 'conflict' && (
           <div className="sync-conflict">
-            <h3>{metadata.conflict ? '本地与远端都已变化' : '远端文件状态已变化'}</h3>
+            <h3>{metadata.conflictReason === 'missing-etag-confirmation'
+              ? '首次确认同步版本'
+              : metadata.conflict ? '本地与远端都已变化' : '远端文件状态已变化'}</h3>
             <p>
-              {!metadata.hasTrustedBaseline
+              {metadata.conflictReason === 'missing-etag-confirmation'
+                ? 'WebDAV 服务未提供 ETag，只需首次确认使用本地或远端版本。确认后将使用内容哈希继续三方同步，系统目前未覆盖任何数据。'
+                : !metadata.hasTrustedBaseline
                 ? '无法确认本地与云端的先后关系，系统未覆盖任何数据。请核对摘要后选择保留哪一份。'
                 : metadata.conflict
                   ? '系统没有覆盖任何一方。请核对摘要后选择整份保留，或暂不处理。'

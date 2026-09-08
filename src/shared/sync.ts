@@ -119,18 +119,21 @@ async function completeSync(
   hash: string,
   etag: string | undefined,
   action: Exclude<SyncAction, 'conflict'>,
+  fallbackConfirmed = false,
 ): Promise<void> {
-  if (!etag?.trim()) {
+  const concurrencyMode = etag?.trim() ? 'etag' : fallbackConfirmed ? 'hash-fallback' : undefined;
+  if (!concurrencyMode) {
     throw new WebDAVError(
       'MISSING_ETAG',
-      '远端服务未提供 ETag，无法建立可信同步基线；请改用支持 ETag 的 WebDAV 服务',
+      'WebDAV 服务未提供 ETag，需要首次确认本地或远端版本后才能继续同步',
     );
   }
   await StorageService.saveSyncMetadata({
     status: 'synced',
     hasTrustedBaseline: true,
+    concurrencyMode,
     lastAction: action,
-    etag,
+    etag: concurrencyMode === 'etag' ? etag : undefined,
     lastSyncedHash: hash,
     lastSyncedAt: new Date().toISOString(),
   });
@@ -197,6 +200,38 @@ async function upload(
   await completeSync(localHash, nextEtag, create ? 'create-remote' : 'upload-local');
 }
 
+async function uploadWithHashFallback(
+  data: BackupData,
+  localHash: string,
+  expectedRemoteHash: string,
+  config: WebDAVConfig,
+  forceSidecarUpload = false,
+): Promise<void> {
+  const checked = await getRemoteDocument(config);
+  if (!checked.exists) throw new Error('远端文件已变化，无法按内容哈希安全上传');
+  const checkedParsed = parseAndValidateBackup(checked.json || '');
+  if (!checkedParsed.success) throw new Error(`远端备份无效：${checkedParsed.error.message}`);
+  const checkedHash = await sha256BusinessData(checkedParsed.document.data);
+  if (checkedHash !== expectedRemoteHash) {
+    throw new WebDAVError('PRECONDITION_FAILED', '上传前远端内容已变化，已停止覆盖并进入冲突状态');
+  }
+
+  const document = createBackupDocument(data, extensionVersion());
+  const putResult = await putRemoteDocument(
+    config,
+    serializeBackup(document),
+    checked.etag ? { type: 'update', etag: checked.etag } : { type: 'overwrite' },
+  );
+  const verified = await getRemoteDocument(config);
+  if (!verified.exists) throw new Error('上传后远端文件不存在，无法验证同步结果');
+  const verifiedParsed = parseAndValidateBackup(verified.json || '');
+  if (!verifiedParsed.success) throw new Error(`上传后远端备份无效：${verifiedParsed.error.message}`);
+  const verifiedHash = await sha256BusinessData(verifiedParsed.document.data);
+  if (verifiedHash !== localHash) throw new Error('上传后回读内容与本地不一致，未更新同步基线');
+  await syncApplicationRecordsCsvSidecar(data.applicationRecords ?? [], config, forceSidecarUpload);
+  await completeSync(localHash, verified.etag || putResult.etag, 'upload-local', true);
+}
+
 async function performSyncWithResult(reason: string): Promise<SyncExecutionResult> {
   const config = await StorageService.getWebDAVConfig();
   const isManualSync = reason === 'manual';
@@ -231,9 +266,13 @@ async function performSyncWithResult(reason: string): Promise<SyncExecutionResul
     if (action === 'create-remote') {
       await upload(localData, localHash, undefined, true, config, isManualSync);
     } else if (action === 'no-change') {
-      await completeSync(localHash, remote.etag, 'no-change');
+      await completeSync(localHash, remote.etag, 'no-change', true);
     } else if (action === 'upload-local') {
-      await upload(localData, localHash, remote.etag, false, config, isManualSync);
+      if (previous.concurrencyMode === 'hash-fallback' && remoteHash) {
+        await uploadWithHashFallback(localData, localHash, remoteHash, config, isManualSync);
+      } else {
+        await upload(localData, localHash, remote.etag, false, config, isManualSync);
+      }
     } else if (action === 'download-remote' && remoteDocument) {
       await StorageService.applyRemoteBusinessData(remoteDocument.data);
       const effectiveLocalData = await StorageService.getBackupData();
@@ -247,12 +286,16 @@ async function performSyncWithResult(reason: string): Promise<SyncExecutionResul
         );
         return { status: 'conflict' };
       }
-      await completeSync(effectiveHash, remote.etag, 'download-remote');
+      await completeSync(effectiveHash, remote.etag, 'download-remote', true);
     } else if (remoteDocument) {
+      const missingEtagConfirmation = !previous.hasTrustedBaseline && !remote.etag;
       await StorageService.saveSyncMetadata({
         ...previous,
         status: 'conflict',
-        lastError: '本地和远端数据均有变化，请选择保留版本',
+        lastError: missingEtagConfirmation
+          ? 'WebDAV 服务未提供 ETag，只需首次确认使用本地或远端版本，之后将按内容哈希安全同步'
+          : '本地和远端数据均有变化，请选择保留版本',
+        conflictReason: missingEtagConfirmation ? 'missing-etag-confirmation' : undefined,
         conflict: {
           local: createBackupSummary(localDocument),
           remote: createBackupSummary(remoteDocument),
@@ -302,7 +345,19 @@ async function performForceUploadLocal(): Promise<SyncResultStatus> {
       getRemoteDocument(config),
     ]);
     const localHash = await sha256BusinessData(localData);
-    await upload(localData, localHash, remote.etag, !remote.exists, config, true);
+    if (remote.exists && !remote.etag) {
+      const parsed = parseAndValidateBackup(remote.json || '');
+      if (!parsed.success) throw new Error(`远端备份无效：${parsed.error.message}`);
+      await uploadWithHashFallback(
+        localData,
+        localHash,
+        await sha256BusinessData(parsed.document.data),
+        config,
+        true,
+      );
+    } else {
+      await upload(localData, localHash, remote.etag, !remote.exists, config, true);
+    }
     return 'synced';
   } catch (error) {
     return await setError(error, '上传失败');
@@ -336,7 +391,7 @@ async function performForceDownloadRemote(): Promise<SyncResultStatus> {
       );
       return 'conflict';
     }
-    await completeSync(effectiveHash, remote.etag, 'download-remote');
+    await completeSync(effectiveHash, remote.etag, 'download-remote', true);
     return 'synced';
   } catch (error) {
     return await setError(error, '下载失败');

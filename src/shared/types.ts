@@ -179,7 +179,10 @@ export interface SyncConflictSummary {
   remote: BackupSummary;
 }
 
+export type SyncConcurrencyMode = 'etag' | 'hash-fallback';
+
 export interface SyncMetadata {
+  concurrencyMode?: SyncConcurrencyMode;
   etag?: string;
   lastSyncedHash?: string;
   lastSyncedAt?: string;
@@ -188,6 +191,7 @@ export interface SyncMetadata {
   lastAction?: Exclude<SyncAction, 'conflict'>;
   lastError?: string;
   conflict?: SyncConflictSummary;
+  conflictReason?: 'missing-etag-confirmation';
 }
 
 export type ApplicationRecordStatus =

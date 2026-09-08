@@ -134,3 +134,33 @@ test('缺少 ETag 的同步错误不显示成功且不刷新设置页数据', as
     await cleanup(renderer);
   }
 });
+
+
+test('首次无 ETag 冲突显示一次确认说明、摘要和三个处理按钮', async () => {
+  let renderer: TestRenderer.ReactTestRenderer | undefined;
+  try {
+    ({ renderer } = await renderSettings(
+      { status: 'conflict' },
+      {
+        status: 'conflict',
+        hasTrustedBaseline: false,
+        conflictReason: 'missing-etag-confirmation',
+        lastError: 'WebDAV 服务未提供 ETag',
+        conflict: {
+          local: { exportedAt: '2026-01-01', profileCount: 1, hasResume: true, hasApiKey: true, hasWebDAVConfig: false },
+          remote: { exportedAt: '2026-01-02', profileCount: 1, hasResume: true, hasApiKey: true, hasWebDAVConfig: false },
+        },
+      },
+    ));
+    const pageText = JSON.stringify(renderer.toJSON());
+    assert.match(pageText, /服务未提供 ETag，只需首次确认/);
+    assert.match(pageText, /本地版本/);
+    assert.match(pageText, /远端版本/);
+    const buttons = renderer.root.findAllByType('button').flatMap(button => button.children);
+    assert.ok(buttons.includes('使用本地'));
+    assert.ok(buttons.includes('使用远端'));
+    assert.ok(buttons.includes('暂不处理'));
+  } finally {
+    await cleanup(renderer);
+  }
+});

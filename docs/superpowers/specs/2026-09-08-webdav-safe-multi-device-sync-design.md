@@ -12,7 +12,7 @@
 - 只有本地发生变化且云端相对可信基线未变化时，才允许自动上传。
 - 本地和云端都变化时进入冲突，禁止自动覆盖。
 - 同步基线缺失或不可信时，不猜测版本先后关系。
-- 上传继续使用 ETag 条件请求，防止读取后发生并发覆盖。
+- 上传优先使用 ETag 条件请求；无 ETag 服务经用户首次确认后使用上传前复查与上传后回读验证。
 - 不增加常驻“上传本地”或“下载云端”按钮。
 - 同步结果提示明确区分上传、下载、无变化和冲突。
 
@@ -31,6 +31,7 @@
 
 ```ts
 interface SyncMetadata {
+  concurrencyMode?: 'etag' | 'hash-fallback';
   etag?: string;
   lastSyncedHash?: string;
   lastSyncedAt?: string;
@@ -46,7 +47,7 @@ interface SyncMetadata {
 - 已建立可信基线；
 - 旧版本遗留、浏览器数据被清理或首次连接，无法确认基线。
 
-为了兼容已有用户，旧同步元数据只有在同时具备有效 `lastSyncedHash` 和 ETag 时，才迁移为可信基线；缺少任一项均按无可信基线处理。
+为了兼容已有用户，旧同步元数据只有在同时具备有效 `lastSyncedHash` 和 ETag 时，才迁移为可信的 `etag` 基线。显式保存为 `hash-fallback` 的元数据只需非空 `lastSyncedHash`，但该模式只能来自用户明确选择版本，或客户端已经验证本地与远端内容一致的成功同步。
 
 ### 哈希范围
 
@@ -102,7 +103,7 @@ remoteChanged = remoteHash !== lastSyncedHash
 
 ## 并发保护
 
-所有覆盖现有远端文件的上传必须携带读取阶段获得的 ETag：
+ETag 模式下，所有覆盖现有远端文件的上传必须携带读取阶段获得的 ETag；hash-fallback 模式则执行上传前 hash 复查和上传后回读验证：
 
 ```http
 If-Match: <remote-etag>
@@ -171,5 +172,30 @@ If-Match: <remote-etag>
 
 - 电脑 B 修改并上传后，未修改的电脑 A 点击“立即同步”会自动下载 B 的版本。
 - 任何无法确认单边更新的场景都不会自动覆盖云端或本地。
-- 所有自动上传均受 ETag 条件保护。
+- ETag 模式下自动上传受条件请求保护；hash-fallback 模式执行上传前复查与上传后验证，并明确不提供原子并发保证。
 - 用户无需新增常驻方向按钮即可完成正常多端同步。
+
+
+## 规格变更：无 ETag 的 hash-fallback 模式（2026-09-08）
+
+### 模式与可信条件
+
+同步元数据持久化 `concurrencyMode`：
+
+- `etag`：可信基线必须同时包含非空 `lastSyncedHash` 与非空 ETag。
+- `hash-fallback`：可信基线必须包含非空 `lastSyncedHash`，且只能由用户明确选择某一版本，或本地与远端内容已经成功校验一致后建立。
+
+首次发现远端存在、没有 ETag 且本地与远端内容不同，不自动应用或上传。状态进入冲突，保存两侧摘要及 `missing-etag-confirmation` 原因，UI 说明服务未提供 ETag，只需首次确认，并提供“使用本地”“使用远端”“暂不处理”。
+
+用户选择远端后，客户端应用并校验远端内容，将远端 hash 保存为可信 `hash-fallback` 基线。用户选择本地后，客户端再次 GET 并确认远端 hash 未变化，再上传本地，随后 GET 回读并校验上传结果，成功后保存本地 hash 为可信 `hash-fallback` 基线。
+
+### 后续三方同步
+
+建立 `hash-fallback` 基线后，继续按 `localHash`、`remoteHash` 与 `lastSyncedHash` 三方判定：
+
+- 仅远端变化：自动下载并验证，不发送 PUT。
+- 仅本地变化：上传前重新 GET，确认远端 hash 仍等于本次基线；上传后重新 GET，确认远端 hash 等于本地 hash。
+- 双方变化：进入冲突，不自动覆盖。
+- 双方未变：刷新成功时间并保持可信基线。
+
+该模式不能提供 ETag 条件写入的原子并发保证，用户已明确接受此限制。任一后续 GET 或 PUT 流程取得有效 ETag 时，成功同步后自动升级并持久化为 `etag` 模式；之后恢复 `If-Match` 条件写入保护。
