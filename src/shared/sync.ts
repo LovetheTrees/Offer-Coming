@@ -3,6 +3,7 @@ import type {
   BackupData,
   BackupDocument,
   SyncAction,
+  SyncExecutionResult,
   SyncResultStatus,
   WebDAVConfig,
 } from './types';
@@ -190,11 +191,11 @@ async function upload(
   await completeSync(localHash, nextEtag, create ? 'create-remote' : 'upload-local');
 }
 
-export async function performSync(reason: string): Promise<SyncResultStatus> {
+async function performSyncWithResult(reason: string): Promise<SyncExecutionResult> {
   const config = await StorageService.getWebDAVConfig();
   const isManualSync = reason === 'manual';
-  if (!config) return 'disabled';
-  if (!config.enabled && !isManualSync) return 'disabled';
+  if (!config) return { status: 'disabled' };
+  if (!config.enabled && !isManualSync) return { status: 'disabled' };
 
   const previous = await StorageService.getSyncMetadata();
   await StorageService.saveSyncMetadata({ ...previous, status: 'syncing', lastError: undefined });
@@ -239,7 +240,7 @@ export async function performSync(reason: string): Promise<SyncResultStatus> {
           remoteDocument,
           '应用云端数据后的本地内容与远端不一致，已停止同步以避免覆盖',
         );
-        return 'conflict';
+        return { status: 'conflict' };
       }
       await syncApplicationRecordsCsvSidecar(
         effectiveLocalData.applicationRecords ?? [],
@@ -257,7 +258,7 @@ export async function performSync(reason: string): Promise<SyncResultStatus> {
           remote: createBackupSummary(remoteDocument),
         },
       });
-      return 'conflict';
+      return { status: 'conflict' };
     } else {
       await StorageService.saveSyncMetadata({
         ...previous,
@@ -265,20 +266,24 @@ export async function performSync(reason: string): Promise<SyncResultStatus> {
         lastError: '远端文件已被删除，已停止自动重建；请选择上传本地数据或暂不处理',
         conflict: undefined,
       });
-      return 'conflict';
+      return { status: 'conflict' };
     }
-    return 'synced';
+    return { status: 'synced', action: action as Exclude<SyncAction, 'conflict'> };
   } catch (error) {
-    return await setError(error, '同步失败');
+    return { status: await setError(error, '同步失败') };
   }
 }
 
-export function enqueueSync(reason: string): void {
-  syncQueue = syncQueue.then(() => performSync(reason), () => performSync(reason));
+export async function performSync(reason: string): Promise<SyncResultStatus> {
+  return (await performSyncWithResult(reason)).status;
 }
 
-export function enqueueSyncAndWait(reason: string): Promise<SyncResultStatus> {
-  const task = syncQueue.then(() => performSync(reason), () => performSync(reason));
+export function enqueueSync(reason: string): void {
+  syncQueue = syncQueue.then(() => performSyncWithResult(reason), () => performSyncWithResult(reason));
+}
+
+export function enqueueSyncAndWait(reason: string): Promise<SyncExecutionResult> {
+  const task = syncQueue.then(() => performSyncWithResult(reason), () => performSyncWithResult(reason));
   syncQueue = task;
   return task;
 }

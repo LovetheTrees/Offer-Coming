@@ -169,6 +169,11 @@ export interface WebDAVConfig {
 
 export type SyncStatus = 'idle' | 'syncing' | 'synced' | 'conflict' | 'error';
 
+export interface SyncExecutionResult {
+  status: SyncResultStatus;
+  action?: Exclude<SyncAction, 'conflict'>;
+}
+
 export interface SyncConflictSummary {
   local: BackupSummary;
   remote: BackupSummary;

@@ -250,11 +250,8 @@ export async function handleMessage(
     case 'GET_SYNC_STATUS':
       return { success: true, data: await StorageService.getSyncMetadata() };
 
-    case 'SYNC_NOW': {
-      const status = await enqueueSyncAndWait('manual');
-      const metadata = status === 'synced' ? await StorageService.getSyncMetadata() : undefined;
-      return { success: true, data: { status, action: metadata?.lastAction } };
-    }
+    case 'SYNC_NOW':
+      return { success: true, data: await enqueueSyncAndWait('manual') };
 
     case 'FORCE_UPLOAD_LOCAL':
       return { success: true, data: { status: await forceUploadLocal() } };

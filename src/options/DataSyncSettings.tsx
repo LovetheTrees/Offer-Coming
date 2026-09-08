@@ -3,6 +3,7 @@ import { MessageService } from '../shared/message';
 import type {
   BackupSummary,
   SyncAction,
+  SyncExecutionResult,
   SyncMetadata,
   WebDAVConfig,
 } from '../shared/types';
@@ -158,7 +159,7 @@ export function DataSyncSettings({ onDataChanged }: Props) {
   });
 
   const syncNow = () => run('sync', async () => {
-    const response = await MessageService.sendMessage<{ status: string; action?: SyncAction }>({
+    const response = await MessageService.sendMessage<SyncExecutionResult>({
       type: 'SYNC_NOW',
     });
     if (!response.success) {

@@ -10,6 +10,7 @@ import {
 import { normalizeSyncMetadata, StorageService } from './storage.ts';
 import {
   decideSyncAction,
+  enqueueSyncAndWait,
   performSync,
   resolveConflict,
   sha256BusinessData,
@@ -1356,6 +1357,51 @@ test('强制下载应用后的有效 hash 不匹配时同样冲突且不反向�
   } finally {
     globalThis.fetch = originalFetch;
     StorageService.applyRemoteBusinessData = originalApply;
+    mock.restore();
+  }
+});
+
+
+test('排队同步返回各自绑定的 action，不受后续任务改写 metadata 影响', async () => {
+  const baseData: BackupData = { ...completeData, settings: { locale: 'base' } };
+  const localData: BackupData = { ...completeData, settings: { locale: 'local' } };
+  const baseHash = await sha256BusinessData(baseData);
+  const mock = installChromeStorageMock({
+    resumeProfileLibrary: localData.resumeProfileLibrary,
+    llmConfig: localData.llmConfig,
+    settings: localData.settings,
+    applicationRecords: localData.applicationRecords,
+    webdavConfig,
+    syncMetadata: { status: 'synced', hasTrustedBaseline: true, lastSyncedHash: baseHash, etag: '"base"' },
+  });
+  const originalFetch = globalThis.fetch;
+  let remoteData = baseData;
+  let remoteEtag = '"base"';
+  globalThis.fetch = async (input, init) => {
+    const url = String(input);
+    if (init?.method === 'GET') {
+      return new Response(serializeBackup(createBackupDocument(remoteData, '1.0.0')), {
+        status: 200,
+        headers: { ETag: remoteEtag },
+      });
+    }
+    if (init?.method === 'PUT' && url.endsWith('job-application-helper.json')) {
+      const parsed = parseAndValidateBackup(String(init.body));
+      assert.equal(parsed.success, true);
+      if (parsed.success) remoteData = parsed.document.data;
+      remoteEtag = '"uploaded"';
+      return new Response(null, { status: 204, headers: { ETag: remoteEtag } });
+    }
+    return new Response(null, { status: 204 });
+  };
+  try {
+    const first = enqueueSyncAndWait('manual');
+    const second = enqueueSyncAndWait('manual');
+    assert.deepEqual(await first, { status: 'synced', action: 'upload-local' });
+    assert.deepEqual(await second, { status: 'synced', action: 'no-change' });
+    assert.equal((mock.values.syncMetadata as Record<string, unknown>).lastAction, 'no-change');
+  } finally {
+    globalThis.fetch = originalFetch;
     mock.restore();
   }
 });
