@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
+import TestRenderer, { act } from 'react-test-renderer';
 import { ProfileSections } from './ProfileSections.tsx';
 import { shouldReloadProfile } from '../shared/profileStorageChange.ts';
 import type { UserProfile } from '../shared/types.ts';
@@ -196,4 +197,59 @@ test('没有奖项时不显示奖项分区', () => {
   );
 
   assert.doesNotMatch(html, /奖项 \/ 荣誉/);
+});
+
+
+test('专业技能显示在奖项之前并过滤空项', () => {
+  const html = renderToStaticMarkup(
+    React.createElement(ProfileSections, {
+      profile: {
+        ...profile,
+        projects: [{ id: 'p1', name: '项目 A', role: '', startDate: '', endDate: '', description: '' }],
+        skills: ['TypeScript', '  ', 'React'],
+        awards: [{ id: 'a1', name: '优秀毕业生', role: '', date: '', description: '' }],
+      },
+      workingKey: null,
+      onFieldClick: () => {},
+    })
+  );
+
+  assert.match(html, /专业技能/);
+  assert.match(html, /TypeScript/);
+  assert.match(html, /React/);
+  assert.ok(html.indexOf('项目经历') < html.indexOf('专业技能'));
+  assert.ok(html.indexOf('专业技能') < html.indexOf('奖项 / 荣誉'));
+  assert.doesNotMatch(html, />\s+<\/span>/);
+});
+
+test('点击专业技能会传递技能值和稳定工作键', async () => {
+  let clicked: [string, string] | null = null;
+  let renderer!: TestRenderer.ReactTestRenderer;
+  await act(async () => {
+    renderer = TestRenderer.create(
+      React.createElement(ProfileSections, {
+        profile: { ...profile, skills: ['TypeScript', 'React'] },
+        workingKey: null,
+        onFieldClick: (key: string, value: string) => { clicked = [key, value]; },
+      })
+    );
+  });
+
+  const button = renderer.root.findAllByType('button').find(item =>
+    item.findAllByType('span').some(span => span.children.join('') === 'React')
+  );
+  assert.ok(button);
+  await act(async () => { button.props.onClick(); });
+  assert.deepEqual(clicked, ['skill-1', 'React']);
+});
+
+test('没有有效专业技能时不显示专业技能分区', () => {
+  const html = renderToStaticMarkup(
+    React.createElement(ProfileSections, {
+      profile: { ...profile, skills: ['', '  '] },
+      workingKey: null,
+      onFieldClick: () => {},
+    })
+  );
+  assert.doesNotMatch(html, /专业技能/);
 });
