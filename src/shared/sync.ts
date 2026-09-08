@@ -129,6 +129,23 @@ async function completeSync(
   });
 }
 
+async function saveConflictWithoutChangingBaseline(
+  previous: Awaited<ReturnType<typeof StorageService.getSyncMetadata>>,
+  localData: BackupData,
+  remoteDocument: BackupDocument,
+  message: string,
+): Promise<void> {
+  await StorageService.saveSyncMetadata({
+    ...previous,
+    status: 'conflict',
+    lastError: message,
+    conflict: {
+      local: createBackupSummary(createBackupDocument(localData, extensionVersion())),
+      remote: createBackupSummary(remoteDocument),
+    },
+  });
+}
+
 async function syncApplicationRecordsCsvSidecar(
   records: ApplicationRecord[],
   config: WebDAVConfig | null,
@@ -215,21 +232,25 @@ export async function performSync(reason: string): Promise<SyncResultStatus> {
       await StorageService.applyRemoteBusinessData(remoteDocument.data);
       const effectiveLocalData = await StorageService.getBackupData();
       const effectiveHash = await sha256BusinessData(effectiveLocalData);
-      if (effectiveHash === remoteHash) {
-        await syncApplicationRecordsCsvSidecar(
-          effectiveLocalData.applicationRecords ?? [],
-          config,
-          isManualSync,
+      if (effectiveHash !== remoteHash) {
+        await saveConflictWithoutChangingBaseline(
+          previous,
+          effectiveLocalData,
+          remoteDocument,
+          '应用云端数据后的本地内容与远端不一致，已停止同步以避免覆盖',
         );
-        await completeSync(effectiveHash, remote.etag, 'download-remote');
-      } else {
-        await upload(effectiveLocalData, effectiveHash, remote.etag, false, config, isManualSync);
+        return 'conflict';
       }
+      await syncApplicationRecordsCsvSidecar(
+        effectiveLocalData.applicationRecords ?? [],
+        config,
+        isManualSync,
+      );
+      await completeSync(effectiveHash, remote.etag, 'download-remote');
     } else if (remoteDocument) {
       await StorageService.saveSyncMetadata({
         ...previous,
         status: 'conflict',
-        etag: remote.etag,
         lastError: '本地和远端数据均有变化，请选择保留版本',
         conflict: {
           local: createBackupSummary(localDocument),
@@ -241,7 +262,6 @@ export async function performSync(reason: string): Promise<SyncResultStatus> {
       await StorageService.saveSyncMetadata({
         ...previous,
         status: 'conflict',
-        etag: undefined,
         lastError: '远端文件已被删除，已停止自动重建；请选择上传本地数据或暂不处理',
         conflict: undefined,
       });
@@ -287,8 +307,9 @@ async function performForceUploadLocal(): Promise<SyncResultStatus> {
 async function performForceDownloadRemote(): Promise<SyncResultStatus> {
   const config = await StorageService.getWebDAVConfig();
   if (!config) return 'disabled';
+  const previous = await StorageService.getSyncMetadata();
   await StorageService.saveSyncMetadata({
-    ...(await StorageService.getSyncMetadata()),
+    ...previous,
     status: 'syncing',
     lastError: undefined,
   });
@@ -301,12 +322,17 @@ async function performForceDownloadRemote(): Promise<SyncResultStatus> {
     const effectiveLocalData = await StorageService.getBackupData();
     const effectiveHash = await sha256BusinessData(effectiveLocalData);
     const remoteHash = await sha256BusinessData(parsed.document.data);
-    if (effectiveHash === remoteHash) {
-      await syncApplicationRecordsCsvSidecar(effectiveLocalData.applicationRecords ?? [], config, true);
-      await completeSync(effectiveHash, remote.etag, 'download-remote');
-    } else {
-      await upload(effectiveLocalData, effectiveHash, remote.etag, false, config, true);
+    if (effectiveHash !== remoteHash) {
+      await saveConflictWithoutChangingBaseline(
+        previous,
+        effectiveLocalData,
+        parsed.document,
+        '应用云端数据后的本地内容与远端不一致，已停止同步以避免覆盖',
+      );
+      return 'conflict';
     }
+    await syncApplicationRecordsCsvSidecar(effectiveLocalData.applicationRecords ?? [], config, true);
+    await completeSync(effectiveHash, remote.etag, 'download-remote');
     return 'synced';
   } catch (error) {
     return await setError(error, '下载失败');
