@@ -92,6 +92,11 @@ export function ProfileSections({
         onFieldClick={onFieldClick}
         getTitle={(record, index) => record.name || `项目经历 ${index + 1}`}
       />
+      <SkillsSection
+        skills={profile.skills || []}
+        workingKey={workingKey}
+        onFieldClick={onFieldClick}
+      />
       {profile.awards.length > 0 && (
         <RecordSection
           title="奖项 / 荣誉"
@@ -109,6 +114,45 @@ export function ProfileSections({
         onFieldClick={onFieldClick}
       />
     </>
+  );
+}
+
+function SkillsSection({
+  skills,
+  workingKey,
+  onFieldClick,
+}: {
+  skills: string[];
+  workingKey: string | null;
+  onFieldClick: (key: string, value: string) => void;
+}): React.JSX.Element | null {
+  const visibleSkills = skills
+    .map((skill, index) => ({ value: skill.trim(), index }))
+    .filter(skill => skill.value.length > 0);
+  if (visibleSkills.length === 0) return null;
+
+  return (
+    <details className="record-section" open>
+      <SectionSummary title="专业技能" count={visibleSkills.length} />
+      <div className="record-list">
+        {visibleSkills.map(skill => {
+          const key = `skill-${skill.index}`;
+          return (
+            <button
+              key={key}
+              type="button"
+              className="field-row single-field-record"
+              onClick={() => onFieldClick(key, skill.value)}
+              disabled={workingKey !== null}
+              title={workingKey === key ? '正在填写当前字段' : '点击写入当前网页输入框'}
+            >
+              <span className="field-label">技能 {skill.index + 1}</span>
+              <span className="field-value">{skill.value}</span>
+            </button>
+          );
+        })}
+      </div>
+    </details>
   );
 }
 

@@ -85,6 +85,7 @@ test('npm test 使用仓库内受版本控制的 tsx 依赖，而不是 npx 临�
   assert.match(packageJson.scripts!.test, /\bnpm run test:sidepanel\b/);
   assert.match(packageJson.scripts!.test, /\bnpm run test:resume-profiles\b/);
   assert.match(packageJson.scripts!['test:resume-profiles'], /src\/options\/AwardsSection\.test\.tsx/);
+  assert.match(packageJson.scripts!['test:resume-profiles'], /src\/options\/SkillsEditor\.test\.tsx/);
   assert.equal(typeof packageJson.scripts?.['test:sidepanel'], 'string');
   assert.match(packageJson.scripts!['test:sidepanel'], /\btsx\b/);
   assert.doesNotMatch(packageJson.scripts!['test:sidepanel'], /\bnpx\b/);
