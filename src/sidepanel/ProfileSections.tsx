@@ -138,17 +138,20 @@ function SkillsSection({
         {visibleSkills.map(skill => {
           const key = `skill-${skill.index}`;
           return (
-            <button
-              key={key}
-              type="button"
-              className="field-row single-field-record"
-              onClick={() => onFieldClick(key, skill.value)}
-              disabled={workingKey !== null}
-              title={workingKey === key ? '正在填写当前字段' : '点击写入当前网页输入框'}
-            >
-              <span className="field-label">技能 {skill.index + 1}</span>
-              <span className="field-value">{skill.value}</span>
-            </button>
+            <article className="record-card skill-card" key={key}>
+              <div className="field-list">
+                <button
+                  type="button"
+                  className="field-button skill-field-button"
+                  onClick={() => onFieldClick(key, skill.value)}
+                  disabled={workingKey !== null}
+                  title={workingKey === key ? '正在填写当前字段' : '点击写入当前网页输入框'}
+                >
+                  <span className="field-value">{skill.value}</span>
+                  {workingKey === key && <span className="field-working">写入中</span>}
+                </button>
+              </div>
+            </article>
           );
         })}
       </div>

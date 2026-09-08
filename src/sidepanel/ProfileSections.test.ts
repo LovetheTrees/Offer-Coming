@@ -217,6 +217,9 @@ test('专业技能显示在奖项之前并过滤空项', () => {
   assert.match(html, /专业技能/);
   assert.match(html, /TypeScript/);
   assert.match(html, /React/);
+  assert.equal((html.match(/class="record-card skill-card"/g) || []).length, 2);
+  assert.doesNotMatch(html, /技能 1|技能 2|技能 3/);
+  assert.match(html, /class="field-button skill-field-button"/);
   assert.ok(html.indexOf('项目经历') < html.indexOf('专业技能'));
   assert.ok(html.indexOf('专业技能') < html.indexOf('奖项 / 荣誉'));
   assert.doesNotMatch(html, />\s+<\/span>/);
