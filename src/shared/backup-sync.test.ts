@@ -230,6 +230,19 @@ test('旧同步元数据仅在 hash 与 ETag 均有效时迁移为可信基线',
   assert.equal(normalizeSyncMetadata({ status: 'synced', etag: 'e1' }).hasTrustedBaseline, false);
 });
 
+test('显式可信状态缺少完整基线字段时仍会降级为不可信', () => {
+  assert.equal(normalizeSyncMetadata({
+    status: 'synced',
+    hasTrustedBaseline: true,
+    etag: 'e1',
+  }).hasTrustedBaseline, false);
+  assert.equal(normalizeSyncMetadata({
+    status: 'synced',
+    hasTrustedBaseline: true,
+    lastSyncedHash: 'v1',
+  }).hasTrustedBaseline, false);
+});
+
 test('同步元数据显式不可信状态不会被旧字段覆盖', () => {
   assert.equal(normalizeSyncMetadata({
     status: 'synced',

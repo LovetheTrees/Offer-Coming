@@ -48,11 +48,15 @@ function inferCollegeForKnownMockData(school?: string, major?: string): string {
 
 export function normalizeSyncMetadata(value: unknown): SyncMetadata {
   const metadata = value && typeof value === 'object' ? value as Partial<SyncMetadata> : {};
-  const inferredTrusted = Boolean(metadata.lastSyncedHash && metadata.etag);
+  const hasTrustedBaseline = Boolean(
+    metadata.lastSyncedHash
+    && metadata.etag
+    && metadata.hasTrustedBaseline !== false,
+  );
   return {
     ...metadata,
     status: metadata.status ?? 'idle',
-    hasTrustedBaseline: metadata.hasTrustedBaseline ?? inferredTrusted,
+    hasTrustedBaseline,
   };
 }
 
