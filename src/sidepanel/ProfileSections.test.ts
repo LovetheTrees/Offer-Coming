@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
@@ -244,6 +245,15 @@ test('点击专业技能会传递技能值和稳定工作键', async () => {
   assert.ok(button);
   await act(async () => { button.props.onClick(); });
   assert.deepEqual(clicked, ['skill-1', 'React']);
+});
+
+test('专业技能按钮使用全宽文本列而不是通用字段的标签列', () => {
+  const css = readFileSync(new URL('./index.css', import.meta.url), 'utf8');
+
+  assert.match(
+    css,
+    /\.skill-field-button\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\)\s+auto;/s,
+  );
 });
 
 test('没有有效专业技能时不显示专业技能分区', () => {

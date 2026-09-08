@@ -335,6 +335,10 @@ textarea {
   cursor: default;
 }
 
+.skill-field-button {
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
 .field-label {
   color: var(--color-muted);
   font-size: 11px;
