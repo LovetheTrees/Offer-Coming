@@ -1,6 +1,7 @@
 import React from 'react';
 import type { ExperienceInfo, ProjectInfo } from '../shared/types';
 import { sectionStyles as styles } from './sectionStyles';
+import { SkillsEditor } from './SkillsEditor';
 
 interface Props {
   experience: ExperienceInfo[];
@@ -259,14 +260,7 @@ export function ExperienceSection({
         添加项目经历
       </button>
 
-      <h2 style={{ ...styles.sectionTitle, marginTop: '36px' }}>专业技能</h2>
-      <p style={styles.description}>每行一条，填充技能类字段时会合并为一段文本。</p>
-      <textarea
-        value={skills.join('\n')}
-        onChange={e => onChangeSkills(e.target.value.split('\n').map(s => s.trim()).filter(Boolean))}
-        style={{ ...styles.textarea, minHeight: '140px' }}
-        placeholder={'运用SQL、Python进行数据分析\n运用Axure、Figma绘制交互原型'}
-      />
+      <SkillsEditor skills={skills} onChange={onChangeSkills} />
     </div>
   );
 }
