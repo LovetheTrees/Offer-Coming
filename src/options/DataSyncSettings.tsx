@@ -179,11 +179,13 @@ export function DataSyncSettings({ onDataChanged }: Props) {
       type: status === 'error' || status === 'conflict' ? 'error' : 'success',
       text: status === 'synced'
         ? successText[action ?? 'no-change'] ?? '本地与云端已一致'
-        : status === 'conflict'
-          ? '同步遇到冲突，请查看下方同步状态'
-          : status === 'disabled'
-            ? '请先填写并保存 WebDAV 同步设置'
-            : '同步请求已提交，请查看下方同步状态',
+        : status === 'error'
+          ? '同步失败，请查看下方错误信息'
+          : status === 'conflict'
+            ? '同步遇到冲突，请查看下方同步状态'
+            : status === 'disabled'
+              ? '请先填写并保存 WebDAV 同步设置'
+              : '同步请求已提交，请查看下方同步状态',
     });
   });
 

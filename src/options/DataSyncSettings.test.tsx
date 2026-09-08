@@ -120,3 +120,17 @@ test('同步方向按钮仅在冲突状态显示', async () => {
     await cleanup(renderer);
   }
 });
+
+test('缺少 ETag 的同步错误不显示成功且不刷新设置页数据', async () => {
+  let renderer: TestRenderer.ReactTestRenderer | undefined;
+  try {
+    let dataChanges: number;
+    ({ renderer, dataChanges } = await renderSettings({ status: 'error' }));
+    const text = statusText(renderer);
+    assert.match(text, /同步失败/);
+    assert.doesNotMatch(text, /已上传|已下载|已一致|已创建/);
+    assert.equal(dataChanges, 0);
+  } finally {
+    await cleanup(renderer);
+  }
+});

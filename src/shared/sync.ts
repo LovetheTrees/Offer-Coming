@@ -120,6 +120,12 @@ async function completeSync(
   etag: string | undefined,
   action: Exclude<SyncAction, 'conflict'>,
 ): Promise<void> {
+  if (!etag?.trim()) {
+    throw new WebDAVError(
+      'MISSING_ETAG',
+      '远端服务未提供 ETag，无法建立可信同步基线；请改用支持 ETag 的 WebDAV 服务',
+    );
+  }
   await StorageService.saveSyncMetadata({
     status: 'synced',
     hasTrustedBaseline: true,
@@ -225,7 +231,6 @@ async function performSyncWithResult(reason: string): Promise<SyncExecutionResul
     if (action === 'create-remote') {
       await upload(localData, localHash, undefined, true, config, isManualSync);
     } else if (action === 'no-change') {
-      await syncApplicationRecordsCsvSidecar(localData.applicationRecords ?? [], config, isManualSync);
       await completeSync(localHash, remote.etag, 'no-change');
     } else if (action === 'upload-local') {
       await upload(localData, localHash, remote.etag, false, config, isManualSync);
@@ -242,11 +247,6 @@ async function performSyncWithResult(reason: string): Promise<SyncExecutionResul
         );
         return { status: 'conflict' };
       }
-      await syncApplicationRecordsCsvSidecar(
-        effectiveLocalData.applicationRecords ?? [],
-        config,
-        isManualSync,
-      );
       await completeSync(effectiveHash, remote.etag, 'download-remote');
     } else if (remoteDocument) {
       await StorageService.saveSyncMetadata({
@@ -336,7 +336,6 @@ async function performForceDownloadRemote(): Promise<SyncResultStatus> {
       );
       return 'conflict';
     }
-    await syncApplicationRecordsCsvSidecar(effectiveLocalData.applicationRecords ?? [], config, true);
     await completeSync(effectiveHash, remote.etag, 'download-remote');
     return 'synced';
   } catch (error) {

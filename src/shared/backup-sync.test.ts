@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 import {
   createBackupDocument,
@@ -740,11 +741,7 @@ test('仅远端变化时下载并替换本地业务数据', async () => {
     assert.equal(metadata.status, 'synced');
     assert.equal(metadata.etag, '"v2"');
     assert.equal(metadata.lastSyncedHash, await sha256BusinessData(remoteData));
-    assert.ok(requests.some(request =>
-      request.method === 'PUT'
-      && request.url === 'https://dav.example.com/backups/job-application-helper/application-records.csv'
-      && request.body?.includes('companyName,jobTitle,sourceSite'),
-    ));
+    assert.equal(requests.filter(request => request.method === 'PUT').length, 0);
   } finally {
     globalThis.fetch = originalFetch;
     mock.restore();
@@ -1071,7 +1068,7 @@ test('V1 拒绝兼容资料中的非法字段类型', () => {
   }
 });
 
-test('双设备共享远端时未修改设备下载 V2 且不反向上传备份', async () => {
+test('双设备共享远端时未修改设备下载 V2 且所有 PUT 总数为零', async () => {
   const canonical = parseAndValidateBackup(serializeBackup(createBackupDocument(completeData, '1.0.0')));
   assert.ok(canonical.success);
   const v1: BackupData = { ...canonical.document.data, settings: { locale: 'v1' } };
@@ -1079,15 +1076,15 @@ test('双设备共享远端时未修改设备下载 V2 且不反向上传备份'
   const v1Hash = await sha256BusinessData(v1);
   let remoteJson = serializeBackup(createBackupDocument(v1, '1.0.0'));
   let remoteEtag = '"v1"';
-  let backupPutCalls = 0;
+  let putCalls = 0;
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async (input, init) => {
     const url = String(input);
     if (init?.method === 'GET') {
       return new Response(remoteJson, { status: 200, headers: { ETag: remoteEtag } });
     }
+    if (init?.method === 'PUT') putCalls += 1;
     if (url.endsWith('job-application-helper.json')) {
-      backupPutCalls += 1;
       remoteJson = String(init?.body);
       remoteEtag = '"v2"';
     }
@@ -1113,7 +1110,7 @@ test('双设备共享远端时未修改设备下载 V2 且不反向上传备份'
     b.restore();
   }
 
-  const putsBeforeA = backupPutCalls;
+  const putsBeforeA = putCalls;
   const a = installChromeStorageMock({
     resumeProfileLibrary: v1.resumeProfileLibrary,
     llmConfig: v1.llmConfig,
@@ -1130,7 +1127,7 @@ test('双设备共享远端时未修改设备下载 V2 且不反向上传备份'
     assert.equal(aMetadata.lastAction, 'download-remote');
     assert.equal(aMetadata.hasTrustedBaseline, true);
     assert.equal(aMetadata.etag, '"v2"');
-    assert.equal(backupPutCalls - putsBeforeA, 0);
+    assert.equal(putCalls - putsBeforeA, 0);
   } finally {
     globalThis.fetch = originalFetch;
     a.restore();
@@ -1403,5 +1400,131 @@ test('排队同步返回各自绑定的 action，不受后续任务改写 metada
   } finally {
     globalThis.fetch = originalFetch;
     mock.restore();
+  }
+});
+
+test('强制下载成功只读取远端且所有 PUT 总数为零', async () => {
+  const localData: BackupData = { ...completeData, settings: { locale: 'local' } };
+  const remoteData: BackupData = { ...completeData, settings: { locale: 'remote' } };
+  const baseHash = await sha256BusinessData(localData);
+  const mock = installChromeStorageMock({
+    resumeProfileLibrary: localData.resumeProfileLibrary,
+    llmConfig: localData.llmConfig,
+    settings: localData.settings,
+    applicationRecords: localData.applicationRecords,
+    webdavConfig,
+    syncMetadata: { status: 'conflict', hasTrustedBaseline: true, lastSyncedHash: baseHash, etag: '"base"', lastAction: 'no-change' },
+  });
+  const originalFetch = globalThis.fetch;
+  let putCalls = 0;
+  globalThis.fetch = async (_input, init) => {
+    if (init?.method === 'PUT') putCalls += 1;
+    return new Response(serializeBackup(createBackupDocument(remoteData, '1.0.0')), {
+      status: 200,
+      headers: { ETag: '"remote"' },
+    });
+  };
+  try {
+    assert.equal(await resolveConflict('remote'), 'synced');
+    assert.deepEqual((await StorageService.getBackupData()).settings, remoteData.settings);
+    assert.equal(putCalls, 0);
+  } finally {
+    globalThis.fetch = originalFetch;
+    mock.restore();
+  }
+});
+
+test('内容相同但 GET 无 ETag 时明确报错且不建立新基线', async () => {
+  const hash = await sha256BusinessData(completeData);
+  const previous = {
+    status: 'synced',
+    hasTrustedBaseline: false,
+    lastSyncedHash: 'old-hash',
+    lastSyncedAt: '2026-01-01T00:00:00.000Z',
+    lastAction: 'upload-local',
+  };
+  const mock = installChromeStorageMock({
+    resumeProfileLibrary: completeData.resumeProfileLibrary,
+    llmConfig: completeData.llmConfig,
+    settings: completeData.settings,
+    applicationRecords: completeData.applicationRecords,
+    webdavConfig,
+    syncMetadata: previous,
+  });
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response(
+    serializeBackup(createBackupDocument(completeData, '1.0.0')),
+    { status: 200 },
+  );
+  try {
+    assert.equal(await performSync('test-equal-without-etag'), 'error');
+    const metadata = mock.values.syncMetadata as Record<string, unknown>;
+    assert.equal(metadata.status, 'error');
+    assert.match(String(metadata.lastError), /ETag/);
+    assert.equal(metadata.hasTrustedBaseline, false);
+    assert.equal(metadata.lastSyncedHash, previous.lastSyncedHash);
+    assert.equal(metadata.lastSyncedAt, previous.lastSyncedAt);
+    assert.equal(metadata.lastAction, previous.lastAction);
+    assert.equal(metadata.etag, undefined);
+    assert.equal(hash, await sha256BusinessData(await StorageService.getBackupData()));
+  } finally {
+    globalThis.fetch = originalFetch;
+    mock.restore();
+  }
+});
+
+test('下载成功但 GET 无 ETag 时明确报错且不写新 hash 时间或 action', async () => {
+  const localData: BackupData = { ...completeData, settings: { locale: 'base' } };
+  const remoteData: BackupData = { ...completeData, settings: { locale: 'remote' } };
+  const baseHash = await sha256BusinessData(localData);
+  const previous = {
+    status: 'synced',
+    hasTrustedBaseline: true,
+    lastSyncedHash: baseHash,
+    lastSyncedAt: '2026-01-01T00:00:00.000Z',
+    lastAction: 'no-change',
+    etag: '"base"',
+  };
+  const mock = installChromeStorageMock({
+    resumeProfileLibrary: localData.resumeProfileLibrary,
+    llmConfig: localData.llmConfig,
+    settings: localData.settings,
+    applicationRecords: localData.applicationRecords,
+    webdavConfig,
+    syncMetadata: previous,
+  });
+  const originalFetch = globalThis.fetch;
+  let putCalls = 0;
+  globalThis.fetch = async (_input, init) => {
+    if (init?.method === 'PUT') putCalls += 1;
+    return new Response(serializeBackup(createBackupDocument(remoteData, '1.0.0')), { status: 200 });
+  };
+  try {
+    assert.equal(await performSync('test-download-without-etag'), 'error');
+    assert.deepEqual((await StorageService.getBackupData()).settings, remoteData.settings);
+    const metadata = mock.values.syncMetadata as Record<string, unknown>;
+    assert.equal(metadata.status, 'error');
+    assert.match(String(metadata.lastError), /ETag/);
+    assert.equal(metadata.hasTrustedBaseline, previous.hasTrustedBaseline);
+    assert.equal(metadata.lastSyncedHash, previous.lastSyncedHash);
+    assert.equal(metadata.lastSyncedAt, previous.lastSyncedAt);
+    assert.equal(metadata.lastAction, previous.lastAction);
+    assert.equal(metadata.etag, previous.etag);
+    assert.equal(putCalls, 0);
+  } finally {
+    globalThis.fetch = originalFetch;
+    mock.restore();
+  }
+});
+
+test('README 说明 WebDAV 多设备安全同步契约', async () => {
+  const readme = await readFile(new URL('../../README.md', import.meta.url), 'utf8');
+  for (const statement of [
+    '未修改设备会自动下载云端更新',
+    '双方都修改时不会自动覆盖',
+    '首次连接且两边数据不同时需要手动选择',
+    'ETag 用于阻止同步过程中的并发覆盖',
+  ]) {
+    assert.ok(readme.includes(statement), `README 缺少说明：${statement}`);
   }
 });
