@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { MessageService } from '../shared/message';
 import type {
   BackupSummary,
+  SyncAction,
   SyncMetadata,
   WebDAVConfig,
 } from '../shared/types';
@@ -157,20 +158,29 @@ export function DataSyncSettings({ onDataChanged }: Props) {
   });
 
   const syncNow = () => run('sync', async () => {
-    const response = await MessageService.sendMessage<{ status: string }>({
+    const response = await MessageService.sendMessage<{ status: string; action?: SyncAction }>({
       type: 'SYNC_NOW',
     });
     if (!response.success) {
       setNotice({ type: 'error', text: response.error || '同步请求失败' });
       return;
     }
+    const status = response.data?.status;
+    const action = response.data?.action;
+    if (status === 'synced' && action === 'download-remote') onDataChanged();
+    const successText: Partial<Record<SyncAction, string>> = {
+      'create-remote': '已创建云端备份',
+      'upload-local': '已上传本地更新',
+      'no-change': '本地与云端已一致',
+      'download-remote': '已下载云端更新',
+    };
     setNotice({
-      type: response.data?.status === 'error' ? 'error' : 'success',
-      text: response.data?.status === 'synced'
-        ? '同步完成'
-        : response.data?.status === 'conflict'
+      type: status === 'error' || status === 'conflict' ? 'error' : 'success',
+      text: status === 'synced'
+        ? successText[action ?? 'no-change'] ?? '本地与云端已一致'
+        : status === 'conflict'
           ? '同步遇到冲突，请查看下方同步状态'
-          : response.data?.status === 'disabled'
+          : status === 'disabled'
             ? '请先填写并保存 WebDAV 同步设置'
             : '同步请求已提交，请查看下方同步状态',
     });
@@ -310,9 +320,11 @@ export function DataSyncSettings({ onDataChanged }: Props) {
           <div className="sync-conflict">
             <h3>{metadata.conflict ? '本地与远端都已变化' : '远端文件状态已变化'}</h3>
             <p>
-              {metadata.conflict
-                ? '系统没有覆盖任何一方。请核对摘要后选择整份保留，或暂不处理。'
-                : '远端文件可能已被删除。系统没有自动重建，请确认后重新上传本地数据，或暂不处理。'}
+              {!metadata.hasTrustedBaseline
+                ? '无法确认本地与云端的先后关系，系统未覆盖任何数据。请核对摘要后选择保留哪一份。'
+                : metadata.conflict
+                  ? '系统没有覆盖任何一方。请核对摘要后选择整份保留，或暂不处理。'
+                  : '远端文件可能已被删除。系统没有自动重建，请确认后重新上传本地数据，或暂不处理。'}
             </p>
             {metadata.conflict && (
               <div className="conflict-comparison">
