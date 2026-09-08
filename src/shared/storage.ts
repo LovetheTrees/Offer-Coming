@@ -46,6 +46,26 @@ function inferCollegeForKnownMockData(school?: string, major?: string): string {
   return '';
 }
 
+export function normalizeSyncMetadata(value: unknown): SyncMetadata {
+  const metadata = value && typeof value === 'object' ? value as Partial<SyncMetadata> : {};
+  const mode = metadata.concurrencyMode === 'hash-fallback'
+    ? 'hash-fallback'
+    : metadata.etag
+      ? 'etag'
+      : metadata.concurrencyMode;
+  const hasTrustedBaseline = Boolean(
+    metadata.lastSyncedHash
+    && metadata.hasTrustedBaseline !== false
+    && (mode === 'hash-fallback' || (mode === 'etag' && metadata.etag)),
+  );
+  return {
+    ...metadata,
+    concurrencyMode: mode,
+    status: metadata.status ?? 'idle',
+    hasTrustedBaseline,
+  };
+}
+
 export class StorageService {
   static async getResumeProfileLibrary(): Promise<ResumeProfileLibrary> {
     const result = await chrome.storage.local.get([
@@ -246,7 +266,7 @@ export class StorageService {
 
   static async getSyncMetadata(): Promise<SyncMetadata> {
     const result = await chrome.storage.local.get(STORAGE_KEYS.SYNC_METADATA);
-    return (result[STORAGE_KEYS.SYNC_METADATA] as SyncMetadata) || { status: 'idle' };
+    return normalizeSyncMetadata(result[STORAGE_KEYS.SYNC_METADATA]);
   }
 
   static async saveSyncMetadata(metadata: SyncMetadata): Promise<void> {

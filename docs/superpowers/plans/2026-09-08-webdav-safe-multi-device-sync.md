@@ -16,9 +16,9 @@
 - Automatic upload is allowed only when a trusted baseline proves the local side alone changed.
 - A missing or untrusted baseline with different local and remote content must produce a conflict.
 - A download branch must never upload data back to the remote server.
-- Every update of an existing remote file must use the ETag read during the same synchronization attempt.
+- Existing remote updates use the ETag read during the same synchronization attempt when available; confirmed hash-fallback mode must instead recheck the remote hash before PUT and verify it after PUT.
 - Only a fully successful create, upload, verified download, or equal-content comparison establishes a trusted baseline.
-- Existing metadata is trusted only when it contains both a non-empty `lastSyncedHash` and a non-empty ETag.
+- Existing metadata is trusted in `etag` mode only with both a non-empty `lastSyncedHash` and ETag; explicit `hash-fallback` metadata requires a non-empty hash established by confirmation or successful validation.
 - Do not push changes unless the user explicitly requests it.
 
 ---
@@ -350,3 +350,38 @@ Expected:
 git add README.md src/shared/backup-sync.test.ts src/options/DataSyncSettings.test.tsx
 git commit -m "docs: explain safe webdav synchronization" --trailer "Co-Authored-By: Aime <aime@bytedance.com>"
 ```
+
+
+---
+
+### Task 5: No-ETag hash fallback specification change
+
+**Files:**
+- Modify: `src/shared/types.ts`, `src/shared/storage.ts`, `src/shared/sync.ts`, `src/services/webdav.ts`
+- Modify: `src/options/DataSyncSettings.tsx`
+- Test: `src/shared/backup-sync.test.ts`, `src/options/DataSyncSettings.test.tsx`
+- Docs: design document, implementation plan, `README.md`
+
+- [x] **Step 1: Write failing concurrency-mode and no-ETag behavior tests**
+  - Persist and normalize `etag | hash-fallback`.
+  - First differing no-ETag remote produces summaries and confirmation state; equal content is verified and establishes fallback without prompting.
+  - Confirming remote or local establishes a trusted hash baseline.
+  - Cover no-repeat confirmation, A/B remote-only download, both-changed conflict, pre-upload recheck, post-upload verification, and ETag upgrade.
+
+- [x] **Step 2: Verify RED**
+  - Focused sync tests failed on missing mode normalization, missing confirmation reason, remote confirmation, and fallback upload behavior.
+  - Focused UI test failed because the one-time no-ETag explanation was absent.
+
+- [x] **Step 3: Implement the two concurrency modes**
+  - ETag mode requires hash plus ETag and keeps conditional writes.
+  - Hash fallback requires a confirmed/verified hash baseline, rechecks before PUT, verifies after PUT, and upgrades when ETag appears.
+  - If the remote is initially absent and create PUT plus verification GET both omit ETag, matching read-back and local hashes establish a `create-remote` fallback baseline; failed or mismatched read-back leaves no baseline and performs no repeated PUT.
+  - Download paths remain PUT-free.
+
+- [x] **Step 4: Update conflict UI and documentation**
+  - Show the one-time no-ETag explanation, both summaries, and all three choices.
+  - Document the accepted lack of atomic concurrency guarantee in fallback mode.
+
+- [x] **Step 5: Final verification and commit**
+  - Run focused tests, `npm test`, `npm run build`, `npm run lint`, and `git diff --check`.
+  - Commit with the required co-author trailer; do not push.

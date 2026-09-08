@@ -169,18 +169,29 @@ export interface WebDAVConfig {
 
 export type SyncStatus = 'idle' | 'syncing' | 'synced' | 'conflict' | 'error';
 
+export interface SyncExecutionResult {
+  status: SyncResultStatus;
+  action?: Exclude<SyncAction, 'conflict'>;
+}
+
 export interface SyncConflictSummary {
   local: BackupSummary;
   remote: BackupSummary;
 }
 
+export type SyncConcurrencyMode = 'etag' | 'hash-fallback';
+
 export interface SyncMetadata {
+  concurrencyMode?: SyncConcurrencyMode;
   etag?: string;
   lastSyncedHash?: string;
   lastSyncedAt?: string;
+  hasTrustedBaseline: boolean;
   status: SyncStatus;
+  lastAction?: Exclude<SyncAction, 'conflict'>;
   lastError?: string;
   conflict?: SyncConflictSummary;
+  conflictReason?: 'missing-etag-confirmation';
 }
 
 export type ApplicationRecordStatus =

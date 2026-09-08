@@ -2,6 +2,8 @@ import { useEffect, useRef, useState } from 'react';
 import { MessageService } from '../shared/message';
 import type {
   BackupSummary,
+  SyncAction,
+  SyncExecutionResult,
   SyncMetadata,
   WebDAVConfig,
 } from '../shared/types';
@@ -45,7 +47,7 @@ export function DataSyncSettings({ onDataChanged }: Props) {
   const [importSummary, setImportSummary] = useState<BackupSummary | null>(null);
   const [confirmingImport, setConfirmingImport] = useState(false);
   const [config, setConfig] = useState<WebDAVConfig>(EMPTY_CONFIG);
-  const [metadata, setMetadata] = useState<SyncMetadata>({ status: 'idle' });
+  const [metadata, setMetadata] = useState<SyncMetadata>({ status: 'idle', hasTrustedBaseline: false });
   const [busy, setBusy] = useState<string | null>(null);
   const [notice, setNotice] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
 
@@ -157,22 +159,33 @@ export function DataSyncSettings({ onDataChanged }: Props) {
   });
 
   const syncNow = () => run('sync', async () => {
-    const response = await MessageService.sendMessage<{ status: string }>({
+    const response = await MessageService.sendMessage<SyncExecutionResult>({
       type: 'SYNC_NOW',
     });
     if (!response.success) {
       setNotice({ type: 'error', text: response.error || '同步请求失败' });
       return;
     }
+    const status = response.data?.status;
+    const action = response.data?.action;
+    if (status === 'synced' && action === 'download-remote') onDataChanged();
+    const successText: Partial<Record<SyncAction, string>> = {
+      'create-remote': '已创建云端备份',
+      'upload-local': '已上传本地更新',
+      'no-change': '本地与云端已一致',
+      'download-remote': '已下载云端更新',
+    };
     setNotice({
-      type: response.data?.status === 'error' ? 'error' : 'success',
-      text: response.data?.status === 'synced'
-        ? '同步完成'
-        : response.data?.status === 'conflict'
-          ? '同步遇到冲突，请查看下方同步状态'
-          : response.data?.status === 'disabled'
-            ? '请先填写并保存 WebDAV 同步设置'
-            : '同步请求已提交，请查看下方同步状态',
+      type: status === 'error' || status === 'conflict' ? 'error' : 'success',
+      text: status === 'synced'
+        ? successText[action ?? 'no-change'] ?? '本地与云端已一致'
+        : status === 'error'
+          ? '同步失败，请查看下方错误信息'
+          : status === 'conflict'
+            ? '同步遇到冲突，请查看下方同步状态'
+            : status === 'disabled'
+              ? '请先填写并保存 WebDAV 同步设置'
+              : '同步请求已提交，请查看下方同步状态',
     });
   });
 
@@ -239,7 +252,7 @@ export function DataSyncSettings({ onDataChanged }: Props) {
         <div className="data-section-heading">
           <div>
             <h2 className="settings-section-title">WebDAV 同步</h2>
-            <p className="settings-description">以 ETag 条件请求安全同步同一份明文 JSON；投递记录会额外保留一份 CSV 副本；凭据仅保存在本机。</p>
+            <p className="settings-description">优先使用 ETag 条件请求；服务不提供 ETag 时，经首次确认后使用内容哈希校验同步；投递记录会额外保留一份 CSV 副本；凭据仅保存在本机。</p>
           </div>
           <span className={`sync-status sync-status-${metadata.status}`}>
             {STATUS_LABELS[metadata.status]}
@@ -308,11 +321,17 @@ export function DataSyncSettings({ onDataChanged }: Props) {
 
         {metadata.status === 'conflict' && (
           <div className="sync-conflict">
-            <h3>{metadata.conflict ? '本地与远端都已变化' : '远端文件状态已变化'}</h3>
+            <h3>{metadata.conflictReason === 'missing-etag-confirmation'
+              ? '首次确认同步版本'
+              : metadata.conflict ? '本地与远端都已变化' : '远端文件状态已变化'}</h3>
             <p>
-              {metadata.conflict
-                ? '系统没有覆盖任何一方。请核对摘要后选择整份保留，或暂不处理。'
-                : '远端文件可能已被删除。系统没有自动重建，请确认后重新上传本地数据，或暂不处理。'}
+              {metadata.conflictReason === 'missing-etag-confirmation'
+                ? 'WebDAV 服务未提供 ETag，只需首次确认使用本地或远端版本。确认后将使用内容哈希继续三方同步，系统目前未覆盖任何数据。'
+                : !metadata.hasTrustedBaseline
+                ? '无法确认本地与云端的先后关系，系统未覆盖任何数据。请核对摘要后选择保留哪一份。'
+                : metadata.conflict
+                  ? '系统没有覆盖任何一方。请核对摘要后选择整份保留，或暂不处理。'
+                  : '远端文件可能已被删除。系统没有自动重建，请确认后重新上传本地数据，或暂不处理。'}
             </p>
             {metadata.conflict && (
               <div className="conflict-comparison">

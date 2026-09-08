@@ -1,25 +1,166 @@
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
 import test from 'node:test';
+import React from 'react';
+import TestRenderer, { act } from 'react-test-renderer';
+import { MessageService } from '../shared/message';
+import type { SyncAction, SyncMetadata } from '../shared/types';
+import { DataSyncSettings } from './DataSyncSettings';
 
-test('WebDAV 同步文案明确说明投递记录会额外保留 CSV 副本', () => {
-  const source = readFileSync(new URL('./DataSyncSettings.tsx', import.meta.url), 'utf8');
-  assert.match(source, /投递记录会额外保留一份 CSV 副本/);
+const originalSendMessage = MessageService.sendMessage;
+const originalWindow = globalThis.window;
+(globalThis as typeof globalThis & { React: typeof React; IS_REACT_ACT_ENVIRONMENT: boolean }).React = React;
+(globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+
+function statusText(renderer: TestRenderer.ReactTestRenderer): string {
+  return renderer.root.findByProps({ role: 'status' }).children.join('');
+}
+
+async function renderSettings(
+  syncResult: { status: string; action?: SyncAction },
+  metadata: SyncMetadata = { status: 'synced', hasTrustedBaseline: true },
+) {
+  let dataChanges = 0;
+  let renderer!: TestRenderer.ReactTestRenderer;
+  globalThis.window = {
+    setInterval: () => 1,
+    clearInterval: () => undefined,
+  } as unknown as Window & typeof globalThis;
+  MessageService.sendMessage = async message => {
+    if (message.type === 'GET_WEBDAV_CONFIG') {
+      return { success: true, data: { enabled: true, serverUrl: 'https://dav.example.com/', username: 'u', password: 'p' } };
+    }
+    if (message.type === 'GET_SYNC_STATUS') return { success: true, data: metadata };
+    if (message.type === 'SYNC_NOW') return { success: true, data: syncResult };
+    throw new Error(`Unexpected message: ${message.type}`);
+  };
+  await act(async () => {
+    renderer = TestRenderer.create(<DataSyncSettings onDataChanged={() => { dataChanges += 1; }} />);
+  });
+  const syncButton = renderer.root.findAllByType('button').find(button => button.children.includes('立即同步'));
+  assert.ok(syncButton);
+  await act(async () => syncButton.props.onClick());
+  return { renderer, dataChanges };
+}
+
+async function cleanup(renderer?: TestRenderer.ReactTestRenderer) {
+  if (renderer) await act(async () => renderer.unmount());
+  MessageService.sendMessage = originalSendMessage;
+  globalThis.window = originalWindow;
+}
+
+for (const [action, expected] of [
+  ['create-remote', '已创建云端备份'],
+  ['upload-local', '已上传本地更新'],
+  ['no-change', '本地与云端已一致'],
+] as const) {
+  test(`立即同步 ${action} 显示准确结果`, async () => {
+    let renderer: TestRenderer.ReactTestRenderer | undefined;
+    try {
+      ({ renderer } = await renderSettings({ status: 'synced', action }));
+      assert.equal(statusText(renderer), expected);
+    } finally {
+      await cleanup(renderer);
+    }
+  });
+}
+
+test('立即同步下载云端更新后刷新设置页数据', async () => {
+  let renderer: TestRenderer.ReactTestRenderer | undefined;
+  try {
+    let dataChanges: number;
+    ({ renderer, dataChanges } = await renderSettings({ status: 'synced', action: 'download-remote' }));
+    assert.equal(statusText(renderer), '已下载云端更新');
+    assert.equal(dataChanges, 1);
+  } finally {
+    await cleanup(renderer);
+  }
 });
 
-test('本地 JSON 备份文案明确排除投递记录', () => {
-  const source = readFileSync(new URL('./DataSyncSettings.tsx', import.meta.url), 'utf8');
-  assert.match(source, /导入或导出个人资料、简历原文件、AI 配置和通用设置，不包含投递记录。/);
+test('立即同步冲突不显示成功措辞', async () => {
+  let renderer: TestRenderer.ReactTestRenderer | undefined;
+  try {
+    ({ renderer } = await renderSettings({ status: 'conflict' }, { status: 'conflict', hasTrustedBaseline: true }));
+    const text = statusText(renderer);
+    assert.match(text, /同步遇到冲突/);
+    assert.doesNotMatch(text, /已上传|已下载|已一致|已创建/);
+  } finally {
+    await cleanup(renderer);
+  }
 });
 
-test('立即同步按钮不再要求启用自动同步', () => {
-  const source = readFileSync(new URL('./DataSyncSettings.tsx', import.meta.url), 'utf8');
-  assert.doesNotMatch(source, /disabled=\{busy !== null \|\| !config\.enabled\}/);
-  assert.match(source, /disabled=\{busy !== null\}/);
+test('无可信基线冲突明确说明未覆盖任何数据', async () => {
+  let renderer: TestRenderer.ReactTestRenderer | undefined;
+  try {
+    ({ renderer } = await renderSettings(
+      { status: 'conflict' },
+      { status: 'conflict', hasTrustedBaseline: false },
+    ));
+    const pageText = JSON.stringify(renderer.toJSON());
+    assert.match(pageText, /无法确认本地与云端的先后关系，系统未覆盖任何数据/);
+  } finally {
+    await cleanup(renderer);
+  }
 });
 
-test('立即同步成功后显示明确成功提示', () => {
-  const source = readFileSync(new URL('./DataSyncSettings.tsx', import.meta.url), 'utf8');
-  assert.doesNotMatch(source, /操作未完成，请查看下方同步状态/);
-  assert.match(source, /同步完成/);
+test('同步方向按钮仅在冲突状态显示', async () => {
+  let renderer: TestRenderer.ReactTestRenderer | undefined;
+  try {
+    ({ renderer } = await renderSettings({ status: 'synced', action: 'no-change' }));
+    const normalButtons = renderer.root.findAllByType('button').flatMap(button => button.children);
+    assert.ok(!normalButtons.includes('使用本地'));
+    assert.ok(!normalButtons.includes('使用远端'));
+    await cleanup(renderer);
+    renderer = undefined;
+
+    ({ renderer } = await renderSettings({ status: 'conflict' }, { status: 'conflict', hasTrustedBaseline: false }));
+    const conflictButtons = renderer.root.findAllByType('button').flatMap(button => button.children);
+    assert.ok(conflictButtons.includes('重新上传本地数据'));
+    assert.ok(conflictButtons.includes('暂不处理'));
+  } finally {
+    await cleanup(renderer);
+  }
+});
+
+test('缺少 ETag 的同步错误不显示成功且不刷新设置页数据', async () => {
+  let renderer: TestRenderer.ReactTestRenderer | undefined;
+  try {
+    let dataChanges: number;
+    ({ renderer, dataChanges } = await renderSettings({ status: 'error' }));
+    const text = statusText(renderer);
+    assert.match(text, /同步失败/);
+    assert.doesNotMatch(text, /已上传|已下载|已一致|已创建/);
+    assert.equal(dataChanges, 0);
+  } finally {
+    await cleanup(renderer);
+  }
+});
+
+
+test('首次无 ETag 冲突显示一次确认说明、摘要和三个处理按钮', async () => {
+  let renderer: TestRenderer.ReactTestRenderer | undefined;
+  try {
+    ({ renderer } = await renderSettings(
+      { status: 'conflict' },
+      {
+        status: 'conflict',
+        hasTrustedBaseline: false,
+        conflictReason: 'missing-etag-confirmation',
+        lastError: 'WebDAV 服务未提供 ETag',
+        conflict: {
+          local: { exportedAt: '2026-01-01', profileCount: 1, hasResume: true, hasApiKey: true, hasWebDAVConfig: false },
+          remote: { exportedAt: '2026-01-02', profileCount: 1, hasResume: true, hasApiKey: true, hasWebDAVConfig: false },
+        },
+      },
+    ));
+    const pageText = JSON.stringify(renderer.toJSON());
+    assert.match(pageText, /服务未提供 ETag，只需首次确认/);
+    assert.match(pageText, /本地版本/);
+    assert.match(pageText, /远端版本/);
+    const buttons = renderer.root.findAllByType('button').flatMap(button => button.children);
+    assert.ok(buttons.includes('使用本地'));
+    assert.ok(buttons.includes('使用远端'));
+    assert.ok(buttons.includes('暂不处理'));
+  } finally {
+    await cleanup(renderer);
+  }
 });

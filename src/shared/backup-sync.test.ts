@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 import {
   createBackupDocument,
@@ -7,9 +8,10 @@ import {
   parseAndValidateBackup,
   serializeBackup,
 } from './backup.ts';
-import { StorageService } from './storage.ts';
+import { normalizeSyncMetadata, StorageService } from './storage.ts';
 import {
   decideSyncAction,
+  enqueueSyncAndWait,
   performSync,
   resolveConflict,
   sha256BusinessData,
@@ -224,19 +226,48 @@ test('exportedAt 不参与业务数据 hash', async () => {
   assert.equal(await sha256BusinessData(first.data), await sha256BusinessData(second.data));
 });
 
-const decisions: Array<[string, string | undefined, string, string | undefined, boolean, string]> = [
-  ['首次远端不存在', undefined, 'local', undefined, false, 'create-remote'],
-  ['双方相同', 'base', 'same', 'same', true, 'no-change'],
-  ['仅本地变化', 'base', 'local', 'base', true, 'upload-local'],
-  ['仅远端变化', 'base', 'base', 'remote', true, 'download-remote'],
-  ['双方变化', 'base', 'local', 'remote', true, 'conflict'],
-  ['无基线且远端不同', undefined, 'local', 'remote', true, 'conflict'],
-  ['有基线但远端被删除', 'base', 'local', undefined, false, 'conflict'],
+test('旧同步元数据仅在 hash 与 ETag 均有效时迁移为可信基线', () => {
+  assert.equal(normalizeSyncMetadata({ status: 'synced', lastSyncedHash: 'v1', etag: 'e1' }).hasTrustedBaseline, true);
+  assert.equal(normalizeSyncMetadata({ status: 'synced', lastSyncedHash: 'v1' }).hasTrustedBaseline, false);
+  assert.equal(normalizeSyncMetadata({ status: 'synced', etag: 'e1' }).hasTrustedBaseline, false);
+});
+
+test('显式可信状态缺少完整基线字段时仍会降级为不可信', () => {
+  assert.equal(normalizeSyncMetadata({
+    status: 'synced',
+    hasTrustedBaseline: true,
+    etag: 'e1',
+  }).hasTrustedBaseline, false);
+  assert.equal(normalizeSyncMetadata({
+    status: 'synced',
+    hasTrustedBaseline: true,
+    lastSyncedHash: 'v1',
+  }).hasTrustedBaseline, false);
+});
+
+test('同步元数据显式不可信状态不会被旧字段覆盖', () => {
+  assert.equal(normalizeSyncMetadata({
+    status: 'synced',
+    hasTrustedBaseline: false,
+    lastSyncedHash: 'v1',
+    etag: 'e1',
+  }).hasTrustedBaseline, false);
+});
+
+const decisions: Array<[string, boolean, string | undefined, string, string | undefined, boolean, string]> = [
+  ['首次远端不存在', false, undefined, 'local', undefined, false, 'create-remote'],
+  ['无可信基线但双方相同', false, undefined, 'same', 'same', true, 'no-change'],
+  ['可信基线下双方相同', true, 'base', 'same', 'same', true, 'no-change'],
+  ['仅本地变化', true, 'base', 'local', 'base', true, 'upload-local'],
+  ['仅远端变化', true, 'base', 'base', 'remote', true, 'download-remote'],
+  ['双方变化', true, 'base', 'local', 'remote', true, 'conflict'],
+  ['无可信基线且远端不同', false, undefined, 'local', 'remote', true, 'conflict'],
+  ['可信基线下远端被删除', true, 'base', 'base', undefined, false, 'conflict'],
 ];
 
-for (const [name, base, local, remote, exists, expected] of decisions) {
+for (const [name, trusted, base, local, remote, exists, expected] of decisions) {
   test(`同步决策：${name}`, () => {
-    assert.equal(decideSyncAction(base, local, remote, exists), expected);
+    assert.equal(decideSyncAction(trusted, base, local, remote, exists), expected);
   });
 }
 
@@ -519,6 +550,30 @@ function installChromeStorageMock(initial: Record<string, unknown>) {
   };
 }
 
+test('保存 WebDAV 设置和测试连接不会建立或重置同步基线', async () => {
+  const originalMetadata = {
+    status: 'conflict',
+    hasTrustedBaseline: false,
+    lastSyncedHash: 'legacy-hash',
+    etag: 'legacy-etag',
+  };
+  const mock = installChromeStorageMock({ syncMetadata: originalMetadata });
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (_input, init) => (
+    init?.method === 'MKCOL'
+      ? new Response('', { status: 405 })
+      : new Response('', { status: 404 })
+  );
+  try {
+    await StorageService.saveWebDAVConfig(webdavConfig);
+    await testConnection(webdavConfig);
+    assert.deepEqual(mock.values.syncMetadata, originalMetadata);
+  } finally {
+    globalThis.fetch = originalFetch;
+    mock.restore();
+  }
+});
+
 test('已有同步基线后远端文件被删除会进入冲突状态', async () => {
   const baseHash = await sha256BusinessData(completeData);
   const mock = installChromeStorageMock({
@@ -686,11 +741,7 @@ test('仅远端变化时下载并替换本地业务数据', async () => {
     assert.equal(metadata.status, 'synced');
     assert.equal(metadata.etag, '"v2"');
     assert.equal(metadata.lastSyncedHash, await sha256BusinessData(remoteData));
-    assert.ok(requests.some(request =>
-      request.method === 'PUT'
-      && request.url === 'https://dav.example.com/backups/job-application-helper/application-records.csv'
-      && request.body?.includes('companyName,jobTitle,sourceSite'),
-    ));
+    assert.equal(requests.filter(request => request.method === 'PUT').length, 0);
   } finally {
     globalThis.fetch = originalFetch;
     mock.restore();
@@ -1014,5 +1065,829 @@ test('V1 拒绝兼容资料中的非法字段类型', () => {
     const result = parseAndValidateBackup(JSON.stringify(document));
     assert.equal(result.success, false);
     if (!result.success) assert.equal(result.error.code, 'INVALID_USER_PROFILE');
+  }
+});
+
+test('双设备共享远端时未修改设备下载 V2 且所有 PUT 总数为零', async () => {
+  const canonical = parseAndValidateBackup(serializeBackup(createBackupDocument(completeData, '1.0.0')));
+  assert.ok(canonical.success);
+  const v1: BackupData = { ...canonical.document.data, settings: { locale: 'v1' } };
+  const v2: BackupData = { ...canonical.document.data, settings: { locale: 'v2' } };
+  const v1Hash = await sha256BusinessData(v1);
+  let remoteJson = serializeBackup(createBackupDocument(v1, '1.0.0'));
+  let remoteEtag = '"v1"';
+  let putCalls = 0;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input, init) => {
+    const url = String(input);
+    if (init?.method === 'GET') {
+      return new Response(remoteJson, { status: 200, headers: { ETag: remoteEtag } });
+    }
+    if (init?.method === 'PUT') putCalls += 1;
+    if (url.endsWith('job-application-helper.json')) {
+      remoteJson = String(init?.body);
+      remoteEtag = '"v2"';
+    }
+    return new Response(null, { status: 204, headers: { ETag: remoteEtag } });
+  };
+
+  const b = installChromeStorageMock({
+    resumeProfileLibrary: v2.resumeProfileLibrary,
+    llmConfig: v2.llmConfig,
+    settings: v2.settings,
+    applicationRecords: v2.applicationRecords,
+    webdavConfig,
+    syncMetadata: { status: 'synced', hasTrustedBaseline: true, lastSyncedHash: v1Hash, etag: '"v1"' },
+  });
+  try {
+    assert.equal(await performSync('test-device-b'), 'synced');
+    const bMetadata = b.values.syncMetadata as Record<string, unknown>;
+    assert.equal(bMetadata.lastAction, 'upload-local');
+    assert.equal(bMetadata.hasTrustedBaseline, true);
+    assert.equal(bMetadata.lastSyncedHash, await sha256BusinessData(v2));
+    assert.equal(bMetadata.etag, '"v2"');
+  } finally {
+    b.restore();
+  }
+
+  const putsBeforeA = putCalls;
+  const a = installChromeStorageMock({
+    resumeProfileLibrary: v1.resumeProfileLibrary,
+    llmConfig: v1.llmConfig,
+    settings: v1.settings,
+    applicationRecords: v1.applicationRecords,
+    webdavConfig,
+    syncMetadata: { status: 'synced', hasTrustedBaseline: true, lastSyncedHash: v1Hash, etag: '"v1"' },
+  });
+  try {
+    assert.equal(await performSync('test-device-a'), 'synced');
+    assert.deepEqual(await StorageService.getBackupData(), v2);
+    const aMetadata = a.values.syncMetadata as Record<string, unknown>;
+    assert.equal(aMetadata.lastSyncedHash, await sha256BusinessData(v2));
+    assert.equal(aMetadata.lastAction, 'download-remote');
+    assert.equal(aMetadata.hasTrustedBaseline, true);
+    assert.equal(aMetadata.etag, '"v2"');
+    assert.equal(putCalls - putsBeforeA, 0);
+  } finally {
+    globalThis.fetch = originalFetch;
+    a.restore();
+  }
+});
+
+test('应用远端后的有效 hash 不匹配时冲突且不上传或更新可信基线', async () => {
+  const localData: BackupData = { ...completeData, settings: { locale: 'base' } };
+  const remoteData: BackupData = { ...completeData, settings: { locale: 'remote' } };
+  const baseHash = await sha256BusinessData(localData);
+  const originalApply = StorageService.applyRemoteBusinessData;
+  StorageService.applyRemoteBusinessData = async () => undefined;
+  const mock = installChromeStorageMock({
+    resumeProfileLibrary: localData.resumeProfileLibrary,
+    llmConfig: localData.llmConfig,
+    settings: localData.settings,
+    applicationRecords: localData.applicationRecords,
+    webdavConfig,
+    syncMetadata: { status: 'synced', hasTrustedBaseline: true, lastSyncedHash: baseHash, etag: '"base"', lastAction: 'no-change' },
+  });
+  const originalFetch = globalThis.fetch;
+  let backupPutCalls = 0;
+  globalThis.fetch = async (input, init) => {
+    if (init?.method === 'PUT' && String(input).endsWith('job-application-helper.json')) backupPutCalls += 1;
+    return new Response(
+      serializeBackup(createBackupDocument(remoteData, '1.0.0')),
+      { status: 200, headers: { ETag: '"remote"' } },
+    );
+  };
+  try {
+    assert.equal(await performSync('test-effective-hash-mismatch'), 'conflict');
+    const metadata = mock.values.syncMetadata as Record<string, unknown>;
+    assert.equal(metadata.status, 'conflict');
+    assert.equal(metadata.hasTrustedBaseline, true);
+    assert.equal(metadata.lastSyncedHash, baseHash);
+    assert.equal(metadata.lastAction, 'no-change');
+    assert.equal(backupPutCalls, 0);
+  } finally {
+    globalThis.fetch = originalFetch;
+    StorageService.applyRemoteBusinessData = originalApply;
+    mock.restore();
+  }
+});
+
+test('仅本地变化使用本次 GET 的 ETag 上传并记录成功动作', async () => {
+  const baseData: BackupData = { ...completeData, settings: { locale: 'base' } };
+  const localData: BackupData = { ...completeData, settings: { locale: 'local' } };
+  const baseHash = await sha256BusinessData(baseData);
+  const mock = installChromeStorageMock({
+    resumeProfileLibrary: localData.resumeProfileLibrary,
+    llmConfig: localData.llmConfig,
+    settings: localData.settings,
+    applicationRecords: localData.applicationRecords,
+    webdavConfig,
+    syncMetadata: { status: 'synced', hasTrustedBaseline: true, lastSyncedHash: baseHash, etag: '"stale"' },
+  });
+  const originalFetch = globalThis.fetch;
+  let ifMatch: string | null = null;
+  globalThis.fetch = async (input, init) => {
+    if (init?.method === 'GET') return new Response(serializeBackup(createBackupDocument(baseData, '1.0.0')), { status: 200, headers: { ETag: '"fresh"' } });
+    if (String(input).endsWith('job-application-helper.json')) ifMatch = new Headers(init?.headers).get('If-Match');
+    return new Response(null, { status: 204, headers: { ETag: '"uploaded"' } });
+  };
+  try {
+    assert.equal(await performSync('test-local-only'), 'synced');
+    assert.equal(ifMatch, '"fresh"');
+    const metadata = mock.values.syncMetadata as Record<string, unknown>;
+    assert.equal(metadata.hasTrustedBaseline, true);
+    assert.equal(metadata.lastAction, 'upload-local');
+    assert.equal(metadata.lastSyncedHash, await sha256BusinessData(localData));
+    assert.equal(metadata.etag, '"uploaded"');
+  } finally {
+    globalThis.fetch = originalFetch;
+    mock.restore();
+  }
+});
+
+test('冲突决策分支均不上传且保留原可信基线', async () => {
+  const baseData: BackupData = { ...completeData, settings: { locale: 'base' } };
+  const localData: BackupData = { ...completeData, settings: { locale: 'local' } };
+  const remoteData: BackupData = { ...completeData, settings: { locale: 'remote' } };
+  const baseHash = await sha256BusinessData(baseData);
+  for (const scenario of [
+    { name: '双方变化', trusted: true, hash: baseHash, remoteExists: true },
+    { name: '无可信基线且内容不同', trusted: false, hash: undefined, remoteExists: true },
+    { name: '可信基线且远端缺失', trusted: true, hash: baseHash, remoteExists: false },
+  ]) {
+    const mock = installChromeStorageMock({
+      resumeProfileLibrary: localData.resumeProfileLibrary,
+      llmConfig: localData.llmConfig,
+      settings: localData.settings,
+      applicationRecords: localData.applicationRecords,
+      webdavConfig,
+      syncMetadata: { status: 'synced', hasTrustedBaseline: scenario.trusted, lastSyncedHash: scenario.hash, etag: '"base"' },
+    });
+    const originalFetch = globalThis.fetch;
+    let putCalls = 0;
+    globalThis.fetch = async (_input, init) => {
+      if (init?.method === 'PUT') putCalls += 1;
+      return scenario.remoteExists
+        ? new Response(serializeBackup(createBackupDocument(remoteData, '1.0.0')), { status: 200, headers: { ETag: '"remote"' } })
+        : new Response('', { status: 404 });
+    };
+    try {
+      assert.equal(await performSync(`test-${scenario.name}`), 'conflict');
+      const metadata = mock.values.syncMetadata as Record<string, unknown>;
+      assert.equal(metadata.status, 'conflict');
+      assert.equal(metadata.hasTrustedBaseline, scenario.trusted);
+      assert.equal(metadata.lastSyncedHash, scenario.hash);
+      assert.equal(metadata.etag, '"base"');
+      assert.equal(putCalls, 0);
+    } finally {
+      globalThis.fetch = originalFetch;
+      mock.restore();
+    }
+  }
+});
+
+test('条件上传 ETag 失败时不覆盖远端且不更新可信基线', async () => {
+  const baseData: BackupData = { ...completeData, settings: { locale: 'base' } };
+  const localData: BackupData = { ...completeData, settings: { locale: 'local' } };
+  const remoteData: BackupData = { ...completeData, settings: { locale: 'remote-after-race' } };
+  const baseHash = await sha256BusinessData(baseData);
+  const mock = installChromeStorageMock({
+    resumeProfileLibrary: localData.resumeProfileLibrary,
+    llmConfig: localData.llmConfig,
+    settings: localData.settings,
+    applicationRecords: localData.applicationRecords,
+    webdavConfig,
+    syncMetadata: { status: 'synced', hasTrustedBaseline: true, lastSyncedHash: baseHash, etag: '"base"', lastAction: 'no-change' },
+  });
+  const originalFetch = globalThis.fetch;
+  let getCalls = 0;
+  let backupPutCalls = 0;
+  globalThis.fetch = async (input, init) => {
+    if (init?.method === 'GET') {
+      getCalls += 1;
+      const data = getCalls === 1 ? baseData : remoteData;
+      return new Response(serializeBackup(createBackupDocument(data, '1.0.0')), { status: 200, headers: { ETag: getCalls === 1 ? '"fresh"' : '"raced"' } });
+    }
+    if (String(input).endsWith('job-application-helper.json')) backupPutCalls += 1;
+    return new Response('', { status: 412 });
+  };
+  try {
+    assert.equal(await performSync('test-precondition'), 'conflict');
+    const metadata = mock.values.syncMetadata as Record<string, unknown>;
+    assert.equal(metadata.status, 'conflict');
+    assert.equal(metadata.hasTrustedBaseline, true);
+    assert.equal(metadata.lastSyncedHash, baseHash);
+    assert.equal(metadata.etag, '"base"');
+    assert.equal(metadata.lastAction, 'no-change');
+    assert.equal(backupPutCalls, 1);
+  } finally {
+    globalThis.fetch = originalFetch;
+    mock.restore();
+  }
+});
+
+test('应用远端失败时记录错误但不更新可信基线', async () => {
+  const localData: BackupData = { ...completeData, settings: { locale: 'base' } };
+  const remoteData: BackupData = { ...completeData, settings: { locale: 'remote' } };
+  const baseHash = await sha256BusinessData(localData);
+  const originalApply = StorageService.applyRemoteBusinessData;
+  StorageService.applyRemoteBusinessData = async () => { throw new Error('apply failed'); };
+  const mock = installChromeStorageMock({
+    resumeProfileLibrary: localData.resumeProfileLibrary,
+    llmConfig: localData.llmConfig,
+    settings: localData.settings,
+    applicationRecords: localData.applicationRecords,
+    webdavConfig,
+    syncMetadata: { status: 'synced', hasTrustedBaseline: true, lastSyncedHash: baseHash, etag: '"base"', lastAction: 'no-change' },
+  });
+  const originalFetch = globalThis.fetch;
+  let putCalls = 0;
+  globalThis.fetch = async (_input, init) => {
+    if (init?.method === 'PUT') putCalls += 1;
+    return new Response(serializeBackup(createBackupDocument(remoteData, '1.0.0')), { status: 200, headers: { ETag: '"remote"' } });
+  };
+  try {
+    assert.equal(await performSync('test-apply-failure'), 'error');
+    const metadata = mock.values.syncMetadata as Record<string, unknown>;
+    assert.equal(metadata.status, 'error');
+    assert.equal(metadata.hasTrustedBaseline, true);
+    assert.equal(metadata.lastSyncedHash, baseHash);
+    assert.equal(metadata.etag, '"base"');
+    assert.equal(metadata.lastAction, 'no-change');
+    assert.equal(putCalls, 0);
+  } finally {
+    globalThis.fetch = originalFetch;
+    StorageService.applyRemoteBusinessData = originalApply;
+    mock.restore();
+  }
+});
+
+test('强制下载应用后的有效 hash 不匹配时同样冲突且不反向上传', async () => {
+  const localData: BackupData = { ...completeData, settings: { locale: 'local' } };
+  const remoteData: BackupData = { ...completeData, settings: { locale: 'remote' } };
+  const baseHash = await sha256BusinessData(localData);
+  const originalApply = StorageService.applyRemoteBusinessData;
+  StorageService.applyRemoteBusinessData = async () => undefined;
+  const mock = installChromeStorageMock({
+    resumeProfileLibrary: localData.resumeProfileLibrary,
+    llmConfig: localData.llmConfig,
+    settings: localData.settings,
+    applicationRecords: localData.applicationRecords,
+    webdavConfig,
+    syncMetadata: { status: 'conflict', hasTrustedBaseline: true, lastSyncedHash: baseHash, etag: '"base"', lastAction: 'no-change' },
+  });
+  const originalFetch = globalThis.fetch;
+  let backupPutCalls = 0;
+  globalThis.fetch = async (input, init) => {
+    if (init?.method === 'PUT' && String(input).endsWith('job-application-helper.json')) backupPutCalls += 1;
+    return new Response(serializeBackup(createBackupDocument(remoteData, '1.0.0')), { status: 200, headers: { ETag: '"remote"' } });
+  };
+  try {
+    assert.equal(await resolveConflict('remote'), 'conflict');
+    const metadata = mock.values.syncMetadata as Record<string, unknown>;
+    assert.equal(metadata.status, 'conflict');
+    assert.equal(metadata.hasTrustedBaseline, true);
+    assert.equal(metadata.lastSyncedHash, baseHash);
+    assert.equal(metadata.etag, '"base"');
+    assert.equal(metadata.lastAction, 'no-change');
+    assert.equal(backupPutCalls, 0);
+  } finally {
+    globalThis.fetch = originalFetch;
+    StorageService.applyRemoteBusinessData = originalApply;
+    mock.restore();
+  }
+});
+
+
+test('排队同步返回各自绑定的 action，不受后续任务改写 metadata 影响', async () => {
+  const baseData: BackupData = { ...completeData, settings: { locale: 'base' } };
+  const localData: BackupData = { ...completeData, settings: { locale: 'local' } };
+  const baseHash = await sha256BusinessData(baseData);
+  const mock = installChromeStorageMock({
+    resumeProfileLibrary: localData.resumeProfileLibrary,
+    llmConfig: localData.llmConfig,
+    settings: localData.settings,
+    applicationRecords: localData.applicationRecords,
+    webdavConfig,
+    syncMetadata: { status: 'synced', hasTrustedBaseline: true, lastSyncedHash: baseHash, etag: '"base"' },
+  });
+  const originalFetch = globalThis.fetch;
+  let remoteData = baseData;
+  let remoteEtag = '"base"';
+  globalThis.fetch = async (input, init) => {
+    const url = String(input);
+    if (init?.method === 'GET') {
+      return new Response(serializeBackup(createBackupDocument(remoteData, '1.0.0')), {
+        status: 200,
+        headers: { ETag: remoteEtag },
+      });
+    }
+    if (init?.method === 'PUT' && url.endsWith('job-application-helper.json')) {
+      const parsed = parseAndValidateBackup(String(init.body));
+      assert.equal(parsed.success, true);
+      if (parsed.success) remoteData = parsed.document.data;
+      remoteEtag = '"uploaded"';
+      return new Response(null, { status: 204, headers: { ETag: remoteEtag } });
+    }
+    return new Response(null, { status: 204 });
+  };
+  try {
+    const first = enqueueSyncAndWait('manual');
+    const second = enqueueSyncAndWait('manual');
+    assert.deepEqual(await first, { status: 'synced', action: 'upload-local' });
+    assert.deepEqual(await second, { status: 'synced', action: 'no-change' });
+    assert.equal((mock.values.syncMetadata as Record<string, unknown>).lastAction, 'no-change');
+  } finally {
+    globalThis.fetch = originalFetch;
+    mock.restore();
+  }
+});
+
+test('强制下载成功只读取远端且所有 PUT 总数为零', async () => {
+  const localData: BackupData = { ...completeData, settings: { locale: 'local' } };
+  const remoteData: BackupData = { ...completeData, settings: { locale: 'remote' } };
+  const baseHash = await sha256BusinessData(localData);
+  const mock = installChromeStorageMock({
+    resumeProfileLibrary: localData.resumeProfileLibrary,
+    llmConfig: localData.llmConfig,
+    settings: localData.settings,
+    applicationRecords: localData.applicationRecords,
+    webdavConfig,
+    syncMetadata: { status: 'conflict', hasTrustedBaseline: true, lastSyncedHash: baseHash, etag: '"base"', lastAction: 'no-change' },
+  });
+  const originalFetch = globalThis.fetch;
+  let putCalls = 0;
+  globalThis.fetch = async (_input, init) => {
+    if (init?.method === 'PUT') putCalls += 1;
+    return new Response(serializeBackup(createBackupDocument(remoteData, '1.0.0')), {
+      status: 200,
+      headers: { ETag: '"remote"' },
+    });
+  };
+  try {
+    assert.equal(await resolveConflict('remote'), 'synced');
+    assert.deepEqual((await StorageService.getBackupData()).settings, remoteData.settings);
+    assert.equal(putCalls, 0);
+  } finally {
+    globalThis.fetch = originalFetch;
+    mock.restore();
+  }
+});
+
+test('内容相同且 GET 无 ETag 时通过校验建立 hash fallback 基线', async () => {
+  const hash = await sha256BusinessData(completeData);
+  const previous = {
+    status: 'synced',
+    hasTrustedBaseline: false,
+    lastSyncedHash: 'old-hash',
+    lastSyncedAt: '2026-01-01T00:00:00.000Z',
+    lastAction: 'upload-local',
+  };
+  const mock = installChromeStorageMock({
+    resumeProfileLibrary: completeData.resumeProfileLibrary,
+    llmConfig: completeData.llmConfig,
+    settings: completeData.settings,
+    applicationRecords: completeData.applicationRecords,
+    webdavConfig,
+    syncMetadata: previous,
+  });
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response(
+    serializeBackup(createBackupDocument(completeData, '1.0.0')),
+    { status: 200 },
+  );
+  try {
+    assert.equal(await performSync('test-equal-without-etag'), 'synced');
+    const metadata = mock.values.syncMetadata as Record<string, unknown>;
+    assert.equal(metadata.status, 'synced');
+    assert.equal(metadata.hasTrustedBaseline, true);
+    assert.equal(metadata.concurrencyMode, 'hash-fallback');
+    assert.equal(metadata.lastSyncedHash, hash);
+    assert.equal(metadata.lastAction, 'no-change');
+    assert.equal(metadata.etag, undefined);
+    assert.equal(hash, await sha256BusinessData(await StorageService.getBackupData()));
+  } finally {
+    globalThis.fetch = originalFetch;
+    mock.restore();
+  }
+});
+
+test('已有基线下载成功但 GET 无 ETag 时切换为 hash fallback', async () => {
+  const localData: BackupData = { ...completeData, settings: { locale: 'base' } };
+  const remoteData: BackupData = { ...completeData, settings: { locale: 'remote' } };
+  const baseHash = await sha256BusinessData(localData);
+  const previous = {
+    status: 'synced',
+    hasTrustedBaseline: true,
+    lastSyncedHash: baseHash,
+    lastSyncedAt: '2026-01-01T00:00:00.000Z',
+    lastAction: 'no-change',
+    etag: '"base"',
+  };
+  const mock = installChromeStorageMock({
+    resumeProfileLibrary: localData.resumeProfileLibrary,
+    llmConfig: localData.llmConfig,
+    settings: localData.settings,
+    applicationRecords: localData.applicationRecords,
+    webdavConfig,
+    syncMetadata: previous,
+  });
+  const originalFetch = globalThis.fetch;
+  let putCalls = 0;
+  globalThis.fetch = async (_input, init) => {
+    if (init?.method === 'PUT') putCalls += 1;
+    return new Response(serializeBackup(createBackupDocument(remoteData, '1.0.0')), { status: 200 });
+  };
+  try {
+    assert.equal(await performSync('test-download-without-etag'), 'synced');
+    assert.deepEqual((await StorageService.getBackupData()).settings, remoteData.settings);
+    const metadata = mock.values.syncMetadata as Record<string, unknown>;
+    assert.equal(metadata.status, 'synced');
+    assert.equal(metadata.hasTrustedBaseline, true);
+    assert.equal(metadata.concurrencyMode, 'hash-fallback');
+    assert.equal(metadata.lastSyncedHash, await sha256BusinessData(remoteData));
+    assert.equal(metadata.lastAction, 'download-remote');
+    assert.equal(metadata.etag, undefined);
+    assert.equal(putCalls, 0);
+  } finally {
+    globalThis.fetch = originalFetch;
+    mock.restore();
+  }
+});
+
+test('README 说明 WebDAV 多设备安全同步契约', async () => {
+  const readme = await readFile(new URL('../../README.md', import.meta.url), 'utf8');
+  for (const statement of [
+    '未修改设备会自动下载云端更新',
+    '双方都修改时不会自动覆盖',
+    '首次连接且两边数据不同时需要手动选择',
+    '上传前重新读取并确认远端 hash',
+    '如果后续服务开始返回有效 ETag，会自动升级为 ETag 模式',
+  ]) {
+    assert.ok(readme.includes(statement), `README 缺少说明：${statement}`);
+  }
+});
+
+
+test('同步元数据按并发模式校验可信基线', () => {
+  assert.deepEqual(
+    normalizeSyncMetadata({
+      status: 'synced',
+      hasTrustedBaseline: true,
+      concurrencyMode: 'hash-fallback',
+      lastSyncedHash: 'hash-v1',
+    }),
+    {
+      status: 'synced',
+      hasTrustedBaseline: true,
+      concurrencyMode: 'hash-fallback',
+      lastSyncedHash: 'hash-v1',
+    },
+  );
+  assert.equal(normalizeSyncMetadata({
+    status: 'synced',
+    hasTrustedBaseline: true,
+    concurrencyMode: 'hash-fallback',
+  }).hasTrustedBaseline, false);
+});
+
+test('首次遇到无 ETag 且内容不同时仅展示摘要并等待确认', async () => {
+  const localData: BackupData = { ...completeData, settings: { locale: 'local-first' } };
+  const remoteData: BackupData = { ...completeData, settings: { locale: 'remote-first' } };
+  const mock = installChromeStorageMock({
+    resumeProfileLibrary: localData.resumeProfileLibrary,
+    llmConfig: localData.llmConfig,
+    settings: localData.settings,
+    applicationRecords: localData.applicationRecords,
+    webdavConfig,
+    syncMetadata: { status: 'idle', hasTrustedBaseline: false },
+  });
+  const originalFetch = globalThis.fetch;
+  let putCalls = 0;
+  globalThis.fetch = async (_input, init) => {
+    if (init?.method === 'PUT') putCalls += 1;
+    return new Response(serializeBackup(createBackupDocument(remoteData, '1.0.0')), { status: 200 });
+  };
+  try {
+    assert.equal(await performSync('first-no-etag'), 'conflict');
+    const metadata = mock.values.syncMetadata as Record<string, any>;
+    assert.equal(metadata.hasTrustedBaseline, false);
+    assert.equal(metadata.concurrencyMode, undefined);
+    assert.equal(metadata.conflictReason, 'missing-etag-confirmation');
+    assert.equal(metadata.conflict.local.settings?.locale, undefined);
+    assert.ok(metadata.conflict.local && metadata.conflict.remote);
+    assert.match(metadata.lastError, /未提供 ETag.*首次确认/);
+    assert.equal(putCalls, 0);
+    assert.deepEqual((await StorageService.getBackupData()).settings, localData.settings);
+  } finally {
+    globalThis.fetch = originalFetch;
+    mock.restore();
+  }
+});
+
+test('无 ETag 首次选择远端后建立 hash fallback 且后续不重复提示', async () => {
+  const localData: BackupData = { ...completeData, settings: { locale: 'local-confirm' } };
+  const remoteData: BackupData = { ...completeData, settings: { locale: 'remote-confirm' } };
+  const remoteJson = serializeBackup(createBackupDocument(remoteData, '1.0.0'));
+  const mock = installChromeStorageMock({
+    resumeProfileLibrary: localData.resumeProfileLibrary,
+    llmConfig: localData.llmConfig,
+    settings: localData.settings,
+    applicationRecords: localData.applicationRecords,
+    webdavConfig,
+    syncMetadata: {
+      status: 'conflict',
+      hasTrustedBaseline: false,
+      conflictReason: 'missing-etag-confirmation',
+      conflict: {
+        local: createBackupSummary(createBackupDocument(localData, '1.0.0')),
+        remote: createBackupSummary(createBackupDocument(remoteData, '1.0.0')),
+      },
+    },
+  });
+  const originalFetch = globalThis.fetch;
+  let putCalls = 0;
+  globalThis.fetch = async (_input, init) => {
+    if (init?.method === 'PUT') putCalls += 1;
+    return new Response(remoteJson, { status: 200 });
+  };
+  try {
+    assert.equal(await resolveConflict('remote'), 'synced');
+    let metadata = mock.values.syncMetadata as Record<string, unknown>;
+    assert.equal(metadata.concurrencyMode, 'hash-fallback');
+    assert.equal(metadata.hasTrustedBaseline, true);
+    assert.equal(metadata.lastSyncedHash, await sha256BusinessData(remoteData));
+    assert.equal(await performSync('after-confirm'), 'synced');
+    metadata = mock.values.syncMetadata as Record<string, unknown>;
+    assert.equal(metadata.status, 'synced');
+    assert.equal(metadata.concurrencyMode, 'hash-fallback');
+    assert.equal(putCalls, 0);
+  } finally {
+    globalThis.fetch = originalFetch;
+    mock.restore();
+  }
+});
+
+test('hash fallback 上传前复查、上传后回读验证并在 ETag 出现时升级', async () => {
+  const baseData: BackupData = { ...completeData, settings: { locale: 'base-fallback' } };
+  const localData: BackupData = { ...completeData, settings: { locale: 'local-fallback' } };
+  const baseHash = await sha256BusinessData(baseData);
+  let remoteData = baseData;
+  const methods: string[] = [];
+  const mock = installChromeStorageMock({
+    resumeProfileLibrary: localData.resumeProfileLibrary,
+    llmConfig: localData.llmConfig,
+    settings: localData.settings,
+    applicationRecords: localData.applicationRecords,
+    webdavConfig,
+    syncMetadata: {
+      status: 'synced', hasTrustedBaseline: true, concurrencyMode: 'hash-fallback', lastSyncedHash: baseHash,
+    },
+  });
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input, init) => {
+    methods.push(init?.method || 'GET');
+    if (init?.method === 'PUT' && String(input).endsWith('job-application-helper.json')) {
+      const parsed = parseAndValidateBackup(String(init.body));
+      assert.ok(parsed.success);
+      remoteData = parsed.document.data;
+      return new Response(null, { status: 204, headers: { ETag: '"upgraded"' } });
+    }
+    if (init?.method === 'PUT') return new Response(null, { status: 204 });
+    return new Response(serializeBackup(createBackupDocument(remoteData, '1.0.0')), {
+      status: 200,
+    });
+  };
+  try {
+    assert.equal(await performSync('fallback-upload'), 'synced');
+    assert.deepEqual(methods, ['GET', 'GET', 'PUT', 'GET', 'PUT']);
+    const metadata = mock.values.syncMetadata as Record<string, unknown>;
+    assert.equal(metadata.concurrencyMode, 'etag');
+    assert.equal(metadata.etag, '"upgraded"');
+    assert.equal(metadata.lastSyncedHash, await sha256BusinessData(localData));
+  } finally {
+    globalThis.fetch = originalFetch;
+    mock.restore();
+  }
+});
+
+test('hash fallback 双方变化时冲突且不 PUT', async () => {
+  const baseData: BackupData = { ...completeData, settings: { locale: 'base-both' } };
+  const localData: BackupData = { ...completeData, settings: { locale: 'local-both' } };
+  const remoteData: BackupData = { ...completeData, settings: { locale: 'remote-both' } };
+  const mock = installChromeStorageMock({
+    resumeProfileLibrary: localData.resumeProfileLibrary,
+    llmConfig: localData.llmConfig,
+    settings: localData.settings,
+    applicationRecords: localData.applicationRecords,
+    webdavConfig,
+    syncMetadata: {
+      status: 'synced', hasTrustedBaseline: true, concurrencyMode: 'hash-fallback', lastSyncedHash: await sha256BusinessData(baseData),
+    },
+  });
+  const originalFetch = globalThis.fetch;
+  let puts = 0;
+  globalThis.fetch = async (_input, init) => {
+    if (init?.method === 'PUT') puts += 1;
+    return new Response(serializeBackup(createBackupDocument(remoteData, '1.0.0')), { status: 200 });
+  };
+  try {
+    assert.equal(await performSync('fallback-both'), 'conflict');
+    assert.equal(puts, 0);
+  } finally {
+    globalThis.fetch = originalFetch;
+    mock.restore();
+  }
+});
+
+
+test('hash fallback 上传前复查发现远端变化时不 PUT', async () => {
+  const baseData: BackupData = { ...completeData, settings: { locale: 'fallback-base' } };
+  const localData: BackupData = { ...completeData, settings: { locale: 'fallback-local' } };
+  const racedData: BackupData = { ...completeData, settings: { locale: 'fallback-raced' } };
+  const baseHash = await sha256BusinessData(baseData);
+  const mock = installChromeStorageMock({
+    resumeProfileLibrary: localData.resumeProfileLibrary,
+    llmConfig: localData.llmConfig,
+    settings: localData.settings,
+    applicationRecords: localData.applicationRecords,
+    webdavConfig,
+    syncMetadata: { status: 'synced', hasTrustedBaseline: true, concurrencyMode: 'hash-fallback', lastSyncedHash: baseHash },
+  });
+  const originalFetch = globalThis.fetch;
+  let gets = 0;
+  let puts = 0;
+  globalThis.fetch = async (_input, init) => {
+    if (init?.method === 'PUT') puts += 1;
+    gets += 1;
+    const data = gets === 1 ? baseData : racedData;
+    return new Response(serializeBackup(createBackupDocument(data, '1.0.0')), { status: 200 });
+  };
+  try {
+    assert.equal(await performSync('fallback-precheck-race'), 'conflict');
+    assert.equal(puts, 0);
+    assert.equal((mock.values.syncMetadata as Record<string, unknown>).lastSyncedHash, baseHash);
+  } finally {
+    globalThis.fetch = originalFetch;
+    mock.restore();
+  }
+});
+
+test('hash fallback 上传后回读不一致时不更新可信基线', async () => {
+  const baseData: BackupData = { ...completeData, settings: { locale: 'verify-base' } };
+  const localData: BackupData = { ...completeData, settings: { locale: 'verify-local' } };
+  const baseHash = await sha256BusinessData(baseData);
+  const mock = installChromeStorageMock({
+    resumeProfileLibrary: localData.resumeProfileLibrary,
+    llmConfig: localData.llmConfig,
+    settings: localData.settings,
+    applicationRecords: localData.applicationRecords,
+    webdavConfig,
+    syncMetadata: { status: 'synced', hasTrustedBaseline: true, concurrencyMode: 'hash-fallback', lastSyncedHash: baseHash },
+  });
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (_input, init) => init?.method === 'PUT'
+    ? new Response(null, { status: 204 })
+    : new Response(serializeBackup(createBackupDocument(baseData, '1.0.0')), { status: 200 });
+  try {
+    assert.equal(await performSync('fallback-post-verify'), 'error');
+    const metadata = mock.values.syncMetadata as Record<string, unknown>;
+    assert.equal(metadata.lastSyncedHash, baseHash);
+    assert.equal(metadata.concurrencyMode, 'hash-fallback');
+    assert.match(String(metadata.lastError), /回读内容与本地不一致/);
+  } finally {
+    globalThis.fetch = originalFetch;
+    mock.restore();
+  }
+});
+
+test('无 ETag 双设备中 B 上传 V2 后未修改的 A 自动下载 V2', async () => {
+  const v1: BackupData = { ...completeData, settings: { locale: 'fallback-v1' } };
+  const v2: BackupData = { ...completeData, settings: { locale: 'fallback-v2' } };
+  const v1Hash = await sha256BusinessData(v1);
+  let remoteData = v1;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input, init) => {
+    if (init?.method === 'PUT' && String(input).endsWith('job-application-helper.json')) {
+      const parsed = parseAndValidateBackup(String(init.body));
+      assert.ok(parsed.success);
+      remoteData = parsed.document.data;
+      return new Response(null, { status: 204 });
+    }
+    if (init?.method === 'PUT') return new Response(null, { status: 204 });
+    return new Response(serializeBackup(createBackupDocument(remoteData, '1.0.0')), { status: 200 });
+  };
+  const b = installChromeStorageMock({
+    resumeProfileLibrary: v2.resumeProfileLibrary, llmConfig: v2.llmConfig, settings: v2.settings,
+    applicationRecords: v2.applicationRecords, webdavConfig,
+    syncMetadata: { status: 'synced', hasTrustedBaseline: true, concurrencyMode: 'hash-fallback', lastSyncedHash: v1Hash },
+  });
+  try {
+    assert.equal(await performSync('fallback-device-b'), 'synced');
+  } finally {
+    b.restore();
+  }
+  const a = installChromeStorageMock({
+    resumeProfileLibrary: v1.resumeProfileLibrary, llmConfig: v1.llmConfig, settings: v1.settings,
+    applicationRecords: v1.applicationRecords, webdavConfig,
+    syncMetadata: { status: 'synced', hasTrustedBaseline: true, concurrencyMode: 'hash-fallback', lastSyncedHash: v1Hash },
+  });
+  try {
+    assert.equal(await performSync('fallback-device-a'), 'synced');
+    assert.deepEqual((await StorageService.getBackupData()).settings, v2.settings);
+    const metadata = a.values.syncMetadata as Record<string, unknown>;
+    assert.equal(metadata.lastAction, 'download-remote');
+    assert.equal(metadata.concurrencyMode, 'hash-fallback');
+  } finally {
+    globalThis.fetch = originalFetch;
+    a.restore();
+  }
+});
+
+
+test('首次创建无 ETag 时回读 hash 一致后建立 hash fallback 且不重复上传备份', async () => {
+  const localData: BackupData = { ...completeData, settings: { locale: 'create-fallback' } };
+  const localHash = await sha256BusinessData(localData);
+  let remoteJson = '';
+  let backupPutCalls = 0;
+  let getCalls = 0;
+  const mock = installChromeStorageMock({
+    resumeProfileLibrary: localData.resumeProfileLibrary,
+    llmConfig: localData.llmConfig,
+    settings: localData.settings,
+    applicationRecords: localData.applicationRecords,
+    webdavConfig,
+    syncMetadata: { status: 'idle', hasTrustedBaseline: false },
+  });
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input, init) => {
+    const url = String(input);
+    if (init?.method === 'GET') {
+      getCalls += 1;
+      return getCalls === 1
+        ? new Response('', { status: 404 })
+        : new Response(remoteJson, { status: 200 });
+    }
+    if (init?.method === 'PUT' && url.endsWith('job-application-helper.json')) {
+      backupPutCalls += 1;
+      remoteJson = String(init.body);
+    }
+    return new Response(null, { status: 204 });
+  };
+  try {
+    assert.equal(await performSync('create-without-etag'), 'synced');
+    const metadata = mock.values.syncMetadata as Record<string, unknown>;
+    assert.equal(metadata.status, 'synced');
+    assert.equal(metadata.hasTrustedBaseline, true);
+    assert.equal(metadata.concurrencyMode, 'hash-fallback');
+    assert.equal(metadata.lastSyncedHash, localHash);
+    assert.equal(metadata.lastAction, 'create-remote');
+    assert.equal(metadata.conflict, undefined);
+    assert.equal(metadata.conflictReason, undefined);
+    assert.equal(backupPutCalls, 1);
+    assert.equal(getCalls, 2);
+  } finally {
+    globalThis.fetch = originalFetch;
+    mock.restore();
+  }
+});
+
+test('首次创建无 ETag 且回读 hash 不一致时不建立基线也不重复 PUT', async () => {
+  const localData: BackupData = { ...completeData, settings: { locale: 'create-local' } };
+  const differentRemote: BackupData = { ...completeData, settings: { locale: 'create-raced' } };
+  let backupPutCalls = 0;
+  let getCalls = 0;
+  const mock = installChromeStorageMock({
+    resumeProfileLibrary: localData.resumeProfileLibrary,
+    llmConfig: localData.llmConfig,
+    settings: localData.settings,
+    applicationRecords: localData.applicationRecords,
+    webdavConfig,
+    syncMetadata: { status: 'idle', hasTrustedBaseline: false },
+  });
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input, init) => {
+    if (init?.method === 'GET') {
+      getCalls += 1;
+      return getCalls === 1
+        ? new Response('', { status: 404 })
+        : new Response(serializeBackup(createBackupDocument(differentRemote, '1.0.0')), { status: 200 });
+    }
+    if (init?.method === 'PUT' && String(input).endsWith('job-application-helper.json')) backupPutCalls += 1;
+    return new Response(null, { status: 204 });
+  };
+  try {
+    assert.equal(await performSync('create-verify-mismatch'), 'error');
+    const metadata = mock.values.syncMetadata as Record<string, unknown>;
+    assert.equal(metadata.status, 'error');
+    assert.equal(metadata.hasTrustedBaseline, false);
+    assert.equal(metadata.lastSyncedHash, undefined);
+    assert.equal(metadata.lastAction, undefined);
+    assert.match(String(metadata.lastError), /回读内容与本地不一致/);
+    assert.equal(backupPutCalls, 1);
+    assert.equal(getCalls, 2);
+  } finally {
+    globalThis.fetch = originalFetch;
+    mock.restore();
   }
 });
