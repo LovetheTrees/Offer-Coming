@@ -1,6 +1,11 @@
 @echo off
 setlocal enabledelayedexpansion
 
+rem 切换到 UTF-8 代码页以正确显示中文
+for /f "tokens=2 delims=:" %%c in ('chcp') do set "original_cp=%%c"
+set "original_cp=%original_cp: =%"
+chcp 65001 >nul
+
 cd /d "%~dp0"
 echo == Job-Application-Helper 一键安装 ^& 构建 ==
 echo 目录: %cd%
@@ -11,6 +16,7 @@ if errorlevel 1 (
   echo [错误] 未检测到 node。请先安装 Node.js ^(建议 LTS 版本^) 后重试。
   echo 下载: https://nodejs.org/
   pause
+  if defined original_cp chcp %original_cp% >nul
   exit /b 1
 )
 
@@ -18,13 +24,14 @@ where npm >nul 2>nul
 if errorlevel 1 (
   echo [错误] 未检测到 npm。请确认 Node.js 安装正常，然后重试。
   pause
+  if defined original_cp chcp %original_cp% >nul
   exit /b 1
 )
 
 echo node:
 node -v
 echo npm:
-npm -v
+call npm -v
 echo.
 
 node -e "const [a,b]=process.versions.node.split('.').map(Number); process.exit(a>=23 || (a===22&&b>=12) || a===21 || (a===20&&b>=19) ? 0 : 1)"
@@ -33,6 +40,7 @@ if errorlevel 1 (
   echo 请安装 Node.js 20.19+ 或 22.12+，推荐使用最新 LTS 版本。
   echo 下载: https://nodejs.org/
   pause
+  if defined original_cp chcp %original_cp% >nul
   exit /b 1
 )
 
@@ -47,7 +55,6 @@ if exist package-lock.json (
   echo == 安装依赖: npm install ^(未找到 package-lock.json^) ==
   call npm install
 )
-
 if errorlevel 1 (
   set "INSTALL_STATUS=1"
   echo [错误] 依赖安装失败。请查看上方 npm 日志，其中通常会标出失败的依赖。
@@ -78,12 +85,14 @@ if "!BUILD_STATUS!"=="0" (echo 构建: 成功) else (echo 构建: 失败)
 if "!INSTALL_STATUS!!TEST_STATUS!!BUILD_STATUS!" NEQ "000" (
   echo 流程已全部尝试，但存在失败，请根据上方日志处理。
   pause
+  if defined original_cp chcp %original_cp% >nul
   exit /b 1
 )
 
 echo.
 echo 完成！依赖安装、测试和构建均已通过。
 echo 浏览器加载目录: %cd%\dist
-echo 请在 Chrome/Edge 扩展管理页开启开发者模式，然后选择“加载已解压的扩展程序”。
+echo 请在 Chrome/Edge 扩展管理页开启开发者模式，然后选择"加载已解压的扩展程序"。
 pause
+if defined original_cp chcp %original_cp% >nul
 exit /b 0
