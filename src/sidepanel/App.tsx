@@ -180,25 +180,25 @@ export default function App() {
   return (
     <main className="panel">
       <header className="panel-header">
-        <div>
-            <h1>网申信息浮窗</h1>
-            <p className="panel-subtitle">{subtitleText}</p>
-        </div>
-        <div className="header-actions">
-          {!isFloatMode && (
-            <button className="pip-button" onClick={() => void handleOpenFloatWindow()}>
-              打开浮窗
+        <div className="panel-header-main">
+          <h1>网申信息浮窗</h1>
+          <div className="header-actions">
+            {!isFloatMode && (
+              <button className="pip-button" onClick={() => void handleOpenFloatWindow()}>
+                打开浮窗
+              </button>
+            )}
+            {isFloatMode && (
+              <button className="pip-button" onClick={handlePictureInPicture}>
+                {pipWindow && !pipWindow.closed ? '退出置顶' : '置顶小窗'}
+              </button>
+            )}
+            <button className="settings-button" onClick={() => chrome.runtime.openOptionsPage()}>
+              设置
             </button>
-          )}
-          {isFloatMode && (
-            <button className="pip-button" onClick={handlePictureInPicture}>
-              {pipWindow && !pipWindow.closed ? '退出置顶' : '置顶小窗'}
-            </button>
-          )}
-          <button className="settings-button" onClick={() => chrome.runtime.openOptionsPage()}>
-            设置
-          </button>
+          </div>
         </div>
+        <p className="panel-subtitle">{subtitleText}</p>
       </header>
 
       <ProfileSections

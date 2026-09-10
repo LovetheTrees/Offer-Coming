@@ -38,11 +38,18 @@ textarea {
 
 .panel-header {
   display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 0 0 4px 2px;
+  margin-bottom: 14px;
+}
+
+.panel-header-main {
+  display: flex;
   align-items: flex-start;
   justify-content: space-between;
-  gap: 12px;
-  padding: 2px 2px 4px;
-  margin-bottom: 14px;
+  gap: 10px;
+  width: 100%;
 }
 
 .panel-header h1,
@@ -94,17 +101,24 @@ textarea {
 
 .header-actions {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
+  flex-shrink: 0;
   gap: 6px;
+  margin-top: -2px;
 }
 
+.settings-button,
 .pip-button {
+  height: 32px;
+  min-height: 32px;
+  padding: 6px 10px;
   white-space: nowrap;
 }
 
 .panel-subtitle {
+  width: 100%;
+  margin: 0;
   line-height: 1.5;
-  max-width: 260px;
 }
 
 /* 复制成功提示气泡：底部居中，1 秒后自动消失 */
@@ -396,15 +410,14 @@ textarea {
 }
 
 @media (max-width: 360px) {
-  .panel-header {
-    align-items: stretch;
-    flex-direction: column;
-  }
-
   .header-actions {
-    justify-content: flex-end;
+    gap: 4px;
   }
 
+  .settings-button,
+  .pip-button {
+    padding-inline: 8px;
+  }
 }
 
 @media all and (display-mode: picture-in-picture) {
