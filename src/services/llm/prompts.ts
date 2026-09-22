@@ -1,5 +1,11 @@
 import type { UserProfile, VisualRegionFillPayload } from '../../shared/types';
 import type { ChatContentPart } from './types.ts';
+import {
+  compactProfileForSection,
+  serializeCompactProfile,
+  budgetResumeText,
+  truncateForBudget,
+} from './contextBudget.ts';
 
 export interface GenerateAnswerPayload {
   questionText: string;
@@ -64,6 +70,10 @@ ${payload.fieldMaxLength ? `字数限制：${payload.fieldMaxLength}字以内` :
 }
 
 export function buildResumeParsingPrompt(rawText: string): { system: string; user: string } {
+  // 简历原文可能很长（多段经历/项目描述），超过模型窗口前先按预算截断。
+  // 关键信息（个人信息、教育、经历起止、技能）大多集中在前部与尾部的概述，头尾保留足够。
+  const { text: budgeted, truncated } = budgetResumeText(rawText);
+
   const system = `你是简历解析专家。从给定的简历原文中提取结构化数据，输出严格的JSON格式。
 
 输出格式要求：
@@ -136,7 +146,7 @@ export function buildResumeParsingPrompt(rawText: string): { system: string; use
 
   const user = `请解析以下简历：
 
-${rawText}`;
+${budgeted}${truncated ? '\n\n（注意：原文过长，中间部分已被省略，请基于现有内容尽力解析。）' : ''}`;
 
   return { system, user };
 }
@@ -162,7 +172,7 @@ export function buildFieldMatchingPrompt(
     `[${f.index}] name="${f.name}" id="${f.id}" placeholder="${f.placeholder}" label="${f.labelText}" type="${f.type}"`
   ).join('\n');
 
-  const user = `请分析以下表单字段：\n${fieldsDescription}`;
+  const user = `请分析以下表单字段：\n${truncateForBudget(fieldsDescription, 6000)}`;
 
   return { system, user };
 }
@@ -181,14 +191,16 @@ export function buildSectionFillPrompt(
 - 日期使用 YYYY-MM
 - 只返回严格 JSON，格式为 {"字段index": "值"}，不要解释、不要 Markdown`;
 
+  // 只取与当前模块相关的资料子集并做预算截断，避免完整资料超出模型上下文窗口
+  const profileSubset = compactProfileForSection(profile, payload.section);
   const user = `网站：${payload.domain}
 模块：${payload.section}
 
 候选人已有资料：
-${JSON.stringify(profile, null, 2)}
+${serializeCompactProfile(profileSubset)}
 
 待补填字段：
-${JSON.stringify(payload.fields, null, 2)}
+${truncateForBudget(JSON.stringify(payload.fields), 4000)}
 
 请返回字段 index 到填写值的 JSON 映射。`;
 
@@ -213,14 +225,19 @@ export function buildVisualRegionFillPrompt(
 - 只返回严格 JSON，格式为 {"mappings":[{"controlId":"","fieldMeaning":"","matchedProfilePath":"","value":""}]}
 - 不要输出解释、Markdown、代码块或额外字段`;
 
+  // 只取与截图区域相关的资料子集并做预算截断；视觉请求本身已含 base64 截图，
+  // 输入体积更大，因此 profile 预算要比纯文本请求更紧
+  const sectionKey = payload.targetLabel ?? payload.pageContext ?? payload.domain ?? '';
+  const profileSubset = compactProfileForSection(profile, sectionKey);
+
   const sections = [
     payload.requestId ? `requestId: ${payload.requestId}` : '',
     payload.domain ? `网站：${payload.domain}` : '',
     payload.instruction ? `补充指令：${payload.instruction}` : '',
     payload.targetLabel ? `目标标签：${payload.targetLabel}` : '',
-    payload.pageContext ? `页面上下文：${payload.pageContext}` : '',
-    `候选人资料：\n${JSON.stringify(profile, null, 2)}`,
-    `控件清单（只允许输出这些 controlId）：\n${JSON.stringify(payload.controls, null, 2)}`,
+    payload.pageContext ? `页面上下文：${truncateForBudget(payload.pageContext, 600)}` : '',
+    `候选人资料：\n${serializeCompactProfile(profileSubset)}`,
+    `控件清单（只允许输出这些 controlId）：\n${truncateForBudget(JSON.stringify(payload.controls), 4000)}`,
     '请结合截图与控件清单，返回 JSON：{"mappings":[...]}。',
   ].filter(Boolean);
 
@@ -252,14 +269,14 @@ function buildProfileSummary(profile: UserProfile): string {
   if (profile.experience.length > 0) {
     parts.push('工作经历：');
     for (const exp of profile.experience.slice(0, 3)) {
-      parts.push(`- ${exp.company} | ${exp.position} | ${exp.description || ''}`);
+      parts.push(`- ${exp.company} | ${exp.position} | ${truncateForBudget(exp.description || '', 180)}`);
     }
   }
 
   if (profile.projects.length > 0) {
     parts.push('项目经历：');
     for (const proj of profile.projects.slice(0, 3)) {
-      parts.push(`- ${proj.name} | ${proj.role} | ${proj.description || ''}`);
+      parts.push(`- ${proj.name} | ${proj.role} | ${truncateForBudget(proj.description || '', 180)}`);
     }
   }
 

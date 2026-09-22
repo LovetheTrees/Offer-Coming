@@ -224,9 +224,38 @@ function extractErrorMessage(raw: string): string {
 }
 
 function normalizeLLMRequestError(message: string): Error {
+  if (isContextWindowExceeded(message)) {
+    return new Error(
+      '输入内容超过当前模型的上下文窗口。扩展已自动精简简历资料；若仍超限，'
+      + '请在「AI 模型设置」中改用上下文更大的模型（如 32k/128k），'
+      + '或精简简历中过长的经历/项目描述。',
+    );
+  }
   return isImageUnsupportedError(message)
     ? new Error('当前模型不支持图片输入')
     : new Error(message);
+}
+
+/**
+ * 各家平台对「输入上下文超限」的报错措辞不一，尽量命中常见关键词。
+ * 命中时给出可读提示而非原始 400 错误。
+ */
+function isContextWindowExceeded(message: string): boolean {
+  const normalized = message.toLowerCase();
+  const hints = [
+    'context_length_exceeded',
+    'context length exceeded',
+    'context window',
+    'context window length',
+    'maximum context length',
+    'max context length',
+    'token limit',
+    'too many tokens',
+    'prompt is too long',
+    'prompt too long',
+    'input is too long',
+  ];
+  return hints.some(hint => normalized.includes(hint));
 }
 
 function isImageUnsupportedError(message: string): boolean {
